@@ -1,78 +1,75 @@
 ---
 id: "S-06"
-titre: "Défense en profondeur — validation DTO d'entrée + null safety"
-severite: "🔴 BLOCAGE (DTO critique sans @Valid / return null sur méthode publique)"
-applicable_si: [backend]
-declencheurs:
-  - "Tout @RequestBody sur un endpoint à effet dans {{MODULE_CIBLE}}"
-  - "Tout DTO/Command passé à un service métier sans contraintes de validation"
-  - "Tout return null sur une méthode publique"
-  - "Tout Optional.get() sans isPresent()/orElse()"
+title: "Defense in depth — input DTO validation + null safety"
+severity: "🔴 BLOCKER (critical DTO without validation / returning null from a public method)"
+applies_to: [backend]
+triggers:
+  - "Any `[FromBody]` on a side-effect endpoint in {{MODULE_CIBLE}}"
+  - "Any DTO/Command passed to a business service without validation constraints"
+  - "Any `return null` from a public method"
+  - "Any `null!`/`!` suppression used to silence the compiler instead of handling absence"
 version: "1.0"
 ---
 
-## Risque
-Un DTO sans `@Valid` : une valeur `null` atteint le domaine → NPE au cœur de la règle métier, état incohérent.
-Un `return null` sur une méthode publique : le NPE se propage silencieusement plusieurs couches plus loin.
+## Risk
+An unvalidated DTO: a null value reaches the domain → NullReferenceException in the middle of the business rule, inconsistent state.
+A `return null` from a public method: the NRE propagates silently several layers later.
 
-## Règles
+## Rules
 
-**Validation d'entrée (couche Controller) :**
-- Tout `@RequestBody` sur endpoint à effet → `@Valid` obligatoire.
-- Tout DTO/Command → contraintes Bean Validation : `@NotNull`, `@NotBlank`, `@Size`, `@Min`, `@Max`.
-- Violation → handler d'erreur avec format standardisé (fiche A-03).
+**Input validation (controller layer):**
+- Every `[FromBody]` on a side-effect endpoint → validation mandatory (`[ApiController]` + DataAnnotations → automatic 400).
+- Every DTO/Command → DataAnnotations constraints: `[Required]`, `[MinLength]`, `[MaxLength]`, `[Range]`.
+- Violation → error handler with the standardized format (card A-03).
 
-**Null safety (couche domaine) :**
-- Méthode publique retournant une entité optionnelle → `Optional<T>`, jamais `null`.
-- Collection vide → `List.of()` / `Collections.emptyList()`, jamais `null`.
-- `Optional.get()` → toujours `.orElse()`, `.orElseThrow()` ou `.ifPresent()`.
-- Paramètre critique → `Objects.requireNonNull(param, "message")` en début de méthode.
+**Null safety (domain layer):**
+- Public method returning an optional entity → nullable reference + `?? throw` or `Option<T>` — never a silent `null`.
+- Empty collection → `[]`/`Empty<T>.Instance`, never `null`.
+- Critical parameter → `ArgumentNullException.ThrowIfNull(param)` at the start of the method.
+- Nullable reference types enabled (`<Nullable>enable</Nullable>` + `<WarningsAsErrors>nullable</WarningsAsErrors>`).
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — DTO sans validation : valeur null atteint le domaine
-@PostMapping("/{{ENDPOINT}}")
-public {{RESPONSE}} handle(@RequestBody {{COMMAND}} cmd) { ... }
+```csharp
+// ❌ BLOCKER — unvalidated DTO: null values reach the domain
+app.MapPost("/{{ENDPOINT}}", async ({{Command}} cmd) => ...);
 
-record {{COMMAND}}(String userId, BigDecimal amount) {} // pas de contrainte
+public record {{Command}}(string UserId, decimal Amount); // no constraints
 
-// ❌ BLOCAGE — return null sur méthode publique
-public {{ENTITY}} findById(UUID id) {
-    return repository.findById(id).orElse(null); // NPE plusieurs couches plus loin
-}
+// ❌ BLOCKER — returning null from a public method
+public {{Entity}}? FindById(Guid id) =>
+    _repository.Find(id); // null → NRE several layers later
 ```
 
-## Pattern conforme
-```java
-// ✅ Endpoint avec @Valid
-@PostMapping("/{{ENDPOINT}}")
-public {{RESPONSE}} handle(@RequestBody @Valid {{COMMAND}} cmd) { ... }
-
-// ✅ DTO avec contraintes
-record {{COMMAND}}(
-    @NotBlank  String userId,
-    @NotNull @DecimalMin("0.01") BigDecimal amount,
-    @NotBlank  String idempotencyKey
-) {
-    {{COMMAND}} {
-        Objects.requireNonNull(userId, "userId is required");
-        if (amount.compareTo(BigDecimal.ZERO) <= 0)
-            throw new IllegalArgumentException("amount must be > 0");
-    }
+## Compliant pattern
+```csharp
+// ✅ [ApiController] + DataAnnotations — automatic 400
+[ApiController]
+public class {{Controller}}(Service service) : ControllerBase
+{
+    [HttpPost("/{{ENDPOINT}}")]
+    public Task<IActionResult> Handle([FromBody] {{Command}} cmd) =>
+        service.ExecuteAsync(cmd); // model state validated automatically
 }
 
-// ✅ Optional sur méthode publique
-public Optional<{{ENTITY}}> findById(UUID id) {
-    return repository.findById(id);
+// ✅ DTO with constraints
+public sealed record {{Command}}
+{
+    [Required, MinLength(1)] public string UserId { get; init; } = null!;
+    [Required, Range(0.01, double.MaxValue)] public decimal Amount { get; init; }
+    [Required, MinLength(1)] public string IdempotencyKey { get; init; } = null!;
 }
 
-// ✅ Utilisation correcte
-{{ENTITY}} entity = repo.findById(id)
-    .orElseThrow(() -> new NotFoundException(id));
+// ✅ Public method — no silent null
+public {{Entity}} FindById(Guid id) =>
+    _repository.Find(id) ?? throw new NotFoundException(id);
+
+// ✅ Critical parameter
+public void Process({{Entity}} entity) =>
+    ArgumentNullException.ThrowIfNull(entity);
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "@RequestBody" src/ | grep -v "@Valid"` → 0 résultats sur endpoints à effet
-- [ ] `grep -r "return null" src/main/` → 0 sur méthodes publiques de service/domaine
-- [ ] Test : POST avec champ `amount=null` → `400 Bad Request` avec détail structuré
-- [ ] Test : DTO avec valeur invalide → exception dans le constructeur compact
+## CI/CD checklist
+- [ ] `rg "\[FromBody\]" src/ | rg -v "ApiController|Valid"` → 0 results on side-effect endpoints
+- [ ] `rg "return null" src/` → 0 on public service/domain methods
+- [ ] Test: POST with `amount=null` → `400 Bad Request` with a structured detail
+- [ ] Test: DTO with an invalid value → automatic 400 with all violations listed

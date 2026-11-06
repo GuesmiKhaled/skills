@@ -1,72 +1,82 @@
 ---
 id: "B-06"
-titre: "Saga — transactions distribuées sans 2PC"
-severite: "🔴 BLOCAGE (2PC/XA inter-services)"
-applicable_si: [backend]
-declencheurs:
-  - "Tout flux multi-services nécessitant une cohérence transactionnelle dans {{MODULE_CIBLE}}"
-  - "Tout @Transactional couvrant plusieurs services ou plusieurs BDD"
-  - "Tout état métier sans machine d'état explicite"
+title: "Saga — distributed transactions without 2PC"
+severity: "🔴 BLOCKER (2PC/XA across services)"
+applies_to: [backend]
+triggers:
+  - "Any multi-service flow requiring transactional consistency in {{MODULE_CIBLE}}"
+  - "Any single unit of work covering multiple services or multiple databases"
+  - "Any business state without an explicit state machine"
 version: "1.0"
 ---
 
-## Risque
-2PC/XA = verrou distribué : si un participant tombe après le vote PREPARE → toute la transaction reste gelée jusqu'à la récupération manuelle.
-En production : un état gelé indéfiniment = client impacté sans confirmation → P1.
+## Risk
+2PC/XA = distributed lock: if a participant dies after the PREPARE vote → the whole transaction stays frozen until manual recovery.
+In production: a state frozen indefinitely = impacted client without confirmation → P1.
 
-## Règles
+## Rules
 
-- Jamais de 2PC/XA entre microservices (jamais de `@Transactional` couvrant plusieurs BDD).
-- Tout flux multi-services → **Saga chorégraphiée** (events) ou **orchestrée** (Saga orchestrator).
-- Chaque étape → état explicite : `{{STATE_INITIAL}}` → `{{STATE_INTERMEDIATE}}` → `{{STATE_FINAL}}` (ou `{{STATE_FAILED}}` + compensation).
-- Compensation → idempotente (fiche B-02) et tracée (log + événement).
-- État intermédiaire → toujours réconcilié (scheduler de réconciliation).
+- Never 2PC/XA between microservices (never one unit of work spanning multiple databases).
+- Any multi-service flow → **choreographed saga** (events) or **orchestrated** (saga orchestrator).
+- Each step → explicit state: `{{STATE_INITIAL}}` → `{{STATE_INTERMEDIATE}}` → `{{STATE_FINAL}}` (or `{{STATE_FAILED}}` + compensation).
+- Compensation → idempotent (card B-02) and traced (log + event).
+- Intermediate state → always reconciled (reconciliation scheduler).
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — @Transactional couvrant plusieurs services/BDD
-@Transactional
-public void processFlow({{COMMAND}} cmd) {
-    repository.save(entity);                    // BDD A
-    {{EXTERNAL_SERVICE_A}}.create(entity);      // appel HTTP → BDD B
-    {{EXTERNAL_SERVICE_B}}.notify(entity);      // appel HTTP → BDD C
-    // Si notify() échoue → rollback impossible sur B et C
+```csharp
+// ❌ BLOCKER — one scope spanning multiple services/DBs
+public async Task ProcessFlowAsync({{Command}} cmd)
+{
+    _repositoryA.Add(entity);                 // DB A
+    await _repositoryA.SaveChangesAsync();
+    await _externalServiceA.CreateAsync(entity);  // HTTP call → DB B
+    await _externalServiceB.NotifyAsync(entity);  // HTTP call → DB C
+    // If NotifyAsync fails → impossible rollback on B and C
 }
 ```
 
-## Pattern conforme
-```java
-// ✅ Saga chorégraphiée par événements
+## Compliant pattern
+```csharp
+// ✅ Choreographed saga by events
 
-// Étape 1 — Service A
-@Transactional
-public {{ENTITY}} step1({{COMMAND}} cmd) {
-    {{ENTITY}} entity = new {{ENTITY}}(cmd, {{STATE_INITIAL}});
-    repository.save(entity);
-    messagingClient.send("{{EVENT_STEP1}}",
-        new {{EVENT_STEP1_TYPE}}(entity.id(), cmd.idempotencyKey()));
+// Step 1 — Service A
+public async Task<{{Entity}}?> Step1Async({{Command}} cmd)
+{
+    var entity = new {{Entity}}(cmd, {{StateInitial}});
+    _repositoryA.Add(entity);
+    await _repositoryA.SaveChangesAsync(); // scope ends here
+    await _messaging.SendAsync("{{EVENT_STEP1}}",
+        new {{EventStep1Type}}(entity.Id, cmd.IdempotencyKey));
     return entity;
 }
 
-// Étape 2 — Service B (consumer at-least-once + idempotence)
-void onStep1({{EVENT_STEP1_TYPE}} event, Acknowledgment ack) {
-    if (!repositoryB.existsBy(event.entityId())) {
-        repositoryB.save({{ENTITY_B}}.from(event));
-        messagingClient.send("{{EVENT_STEP2}}", ...);
+// Step 2 — Service B (at-least-once consumer + idempotence)
+public async Task OnStep1Async({{EventStep1Type}} evt)
+{
+    if (!await _repositoryB.ExistsByAsync(evt.EntityId))
+    {
+        _repositoryB.Add({{EntityB}}.From(evt));
+        await _repositoryB.SaveChangesAsync();
+        await _messaging.SendAsync("{{EVENT_STEP2}}", ...);
     }
-    ack.acknowledge();
+    await _consumer.CommitAsync(); // commit after the effect
 }
 
-// ✅ Compensation — état FAILED, pas un rollback
-void onFailed({{EVENT_FAILED_TYPE}} event, Acknowledgment ack) {
-    repositoryB.findBy(event.entityId())
-        .ifPresent(e -> repositoryB.save(e.withStatus({{STATE_FAILED}})));
-    ack.acknowledge();
+// ✅ Compensation — FAILED state, not a rollback
+public async Task OnFailedAsync({{EventFailedType}} evt)
+{
+    var e = await _repositoryB.FindAsync(evt.EntityId);
+    if (e is not null)
+    {
+        e.Status = {{StateFailed}}; // idempotent (card B-02)
+        await _repositoryB.SaveChangesAsync();
+    }
+    await _consumer.CommitAsync();
 }
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "@Transactional" src/` → aucun couvrant plusieurs services/BDD
-- [ ] Chaque entité a un état explicite visible : `SELECT status, COUNT(*) FROM {{TABLE}} GROUP BY status`
-- [ ] Scheduler de réconciliation actif : alerter si état intermédiaire > {{RECONCILIATION_TIMEOUT}}
-- [ ] Test de compensation : événement FAILED → entité annulée (idempotent)
+## CI/CD checklist
+- [ ] `rg "SaveChanges" src/` → no scope spanning multiple services/DBs
+- [ ] Every entity has an explicit visible state: `SELECT status, COUNT(*) FROM {{TABLE}} GROUP BY status`
+- [ ] Reconciliation scheduler active: alert if intermediate state > {{RECONCILIATION_TIMEOUT}}
+- [ ] Compensation test: FAILED event → entity cancelled (idempotent)

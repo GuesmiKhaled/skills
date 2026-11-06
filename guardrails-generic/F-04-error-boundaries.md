@@ -1,60 +1,60 @@
 ---
 id: "F-04"
-titre: "Error Boundaries — zéro écran blanc, zéro stack exposée, format d'erreur structuré"
-severite: "🔴 BLOCAGE (stack/PII à l'utilisateur) — 🟡 ALERTE (état erreur non géré)"
-applicable_si: [frontend]
-declencheurs:
-  - "Tout composant appelant l'API dans {{MODULE_CIBLE}}"
-  - "Tout affichage d'erreur à l'utilisateur"
-  - "Tout état vide / chargement / intermédiaire dans l'UI"
+title: "Error boundaries — zero white screen, zero exposed stack, structured error format"
+severity: "🔴 BLOCKER (stack/PII shown to the user) — 🟡 WARNING (unhandled error state)"
+applies_to: [frontend]
+triggers:
+  - "Any component calling the API in {{MODULE_CIBLE}}"
+  - "Any error display to the user"
+  - "Any empty / loading / intermediate state in the UI"
 version: "1.0"
 ---
 
-## Risque
-Écran blanc sur {{HTTP_ERROR_CODE}} = l'utilisateur pense que tout est perdu → appel support + potentiel double-clic.
-Stack trace dans l'UI → fuite d'informations techniques → surface d'attaque.
+## Risk
+White screen on {{HTTP_ERROR_CODE}} = the user thinks everything is lost → support call + potential double-click.
+Stack trace in the UI → leak of technical information → attack surface.
 
-## Règles
+## Rules
 
-- Chaque composant API gère **4 états** : chargement (skeleton), succès, vide, erreur.
-- Erreur HTTP → parse format structuré (`{{ERROR_FORMAT}}`) :
-  - 4xx → erreur client définitive, non rejouable.
-  - 5xx → erreur technique, rejouable avec backoff.
-- Jamais de stack trace, code HTTP nu, message technique affiché à l'utilisateur.
-- État intermédiaire → indicateur visible + message rassurant.
-- Retry UI → borné (backoff + limite max {{MAX_RETRY}} tentatives — fiche B-03).
-- Aucune donnée sensible ({{SENSITIVE_DATA_TYPES}}) dans le message d'erreur.
+- Every API component handles **4 states**: loading (skeleton), success, empty, error.
+- HTTP error → parse the structured format (`{{ERROR_FORMAT}}`):
+  - 4xx → definitive client error, not retryable.
+  - 5xx → technical error, retryable with backoff.
+- Never show a stack trace, a raw HTTP code, or a technical message to the user.
+- Intermediate state → visible indicator + reassuring message.
+- UI retry → bounded (backoff + max {{MAX_RETRY}} attempts — card B-03).
+- No sensitive data ({{SENSITIVE_DATA_TYPES}}) in error messages.
 
 ## Anti-pattern
 ```typescript
-// ❌ BLOCAGE — stack/message technique dans l'UI
+// ❌ BLOCKER — stack/technical message in the UI
 this.{{SERVICE}}.getData().subscribe({
   error: (err) => {
-    this.errorMsg = err.message; // peut contenir une stack trace ou des données internes
+    this.errorMsg = err.message; // may contain a stack trace or internal data
   }
 });
 
-// ❌ ALERTE — état vide = écran blanc
+// ❌ WARNING — empty state = white screen
 @Component({ template: `<div>{{ items | async }}</div>` })
-// Aucune gestion de vide, chargement, erreur
+// No empty, loading or error handling at all
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```typescript
-// ✅ Handler d'erreur avec format structuré ({{ERROR_FORMAT}})
+// ✅ Error handler with the structured format ({{ERROR_FORMAT}})
 @Injectable()
 export class ErrorHandler {
     categorize(err: HttpErrorResponse): UserFacingError {
         const problem = err.error as {{ERROR_RESPONSE_TYPE}};
         return {
             messageKey: this.toI18nKey(problem.{{ERROR_TYPE_FIELD}}, err.status),
-            retryable:  err.status >= 500, // 4xx = définitif, 5xx = rejouable
+            retryable:  err.status >= 500, // 4xx = definitive, 5xx = retryable
             action:     err.status >= 500 ? 'retry' : 'contact-support',
         };
     }
 }
 
-// ✅ Composant — 4 états
+// ✅ Component — 4 states
 @Component({
   template: `
     @if (loading()) { <{{LOADING_COMPONENT}} /> }
@@ -76,16 +76,16 @@ export class ErrorHandler {
   `
 })
 export class {{LIST_COMPONENT}} {
-  loading   = signal(false);
-  error     = signal<UserFacingError | null>(null);
-  items     = signal<{{ITEM_TYPE}}[]>([]);
+  loading    = signal(false);
+  error      = signal<UserFacingError | null>(null);
+  items      = signal<{{ITEM_TYPE}}[]>([]);
   hasPending = computed(() => this.items().some(i => i.status === '{{PENDING_STATUS}}'));
 }
 ```
 
-## Checklist CI/CD
-- [ ] Test : forcer {{HTTP_ERROR_CODE}} → message localisé + bouton Réessayer (pas d'écran blanc, pas de stack)
-- [ ] Test : liste vide → `{{EMPTY_MESSAGE_KEY}}` affiché (pas d'écran blanc)
-- [ ] Test : état intermédiaire → indicateur + message rassurant
-- [ ] Test : réponse erreur contenant une donnée sensible → champ non affiché à l'utilisateur
-- [ ] `grep -r "err.message\|error.stack" src/{{FRONTEND_SRC_PATH}}/ | grep -v "log\|console"` → 0
+## CI/CD checklist
+- [ ] Test: force {{HTTP_ERROR_CODE}} → localized message + Retry button (no white screen, no stack)
+- [ ] Test: empty list → `{{EMPTY_MESSAGE_KEY}}` displayed (no white screen)
+- [ ] Test: intermediate state → indicator + reassuring message
+- [ ] Test: error response containing sensitive data → field not shown to the user
+- [ ] `rg "err\.message|error\.stack" src/{{FRONTEND_SRC_PATH}}/ | rg -v "log|console"` → 0

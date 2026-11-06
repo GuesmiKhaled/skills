@@ -1,75 +1,76 @@
 ---
 id: "B-05"
-titre: "Messaging — Delivery garantie, DLQ, Domain Events, chiffrement en transit"
-severite: "🔴 BLOCAGE (événement à effet at-most-once / sans DLQ / en clair) — 🟡 ALERTE"
-applicable_si: [backend]
-declencheurs:
-  - "Tout producer/consommateur de messages : {{MESSAGE_BROKER}} (Kafka, RabbitMQ, SQS, etc.)"
-  - "Tout appel inter-service synchrone remplaçable par un événement de domaine"
-  - "Tout topic/queue sans chiffrement sur un flux sensible ({{COMPLIANCE_STANDARD}})"
+title: "Messaging — guaranteed delivery, DLQ, domain events, in-transit encryption"
+severity: "🔴 BLOCKER (side-effect event at-most-once / no DLQ / unencrypted) — 🟡 WARNING"
+applies_to: [backend]
+triggers:
+  - "Any producer/consumer of messages: {{MESSAGE_BROKER}} (Kafka, RabbitMQ, Service Bus, etc.)"
+  - "Any synchronous cross-service call that can be replaced by a domain event"
+  - "Any topic/queue without encryption on a sensitive flow ({{COMPLIANCE_STANDARD}})"
 version: "1.0"
 ---
 
-## Risque
-`{{DELIVERY_GUARANTEE}}=at-most-once` sur un topic à effet : message perdu = opération perdue sans trace.
-Chiffrement absent sur un topic sensible : violation de {{COMPLIANCE_STANDARD}} (données en transit non chiffrées).
-Appel HTTP synchrone inter-service : si le service cible est down → la transaction entière échoue → couplage temporel.
+## Risk
+`{{DELIVERY_GUARANTEE}}=at-most-once` on a side-effect topic: message lost = operation lost without a trace.
+Missing encryption on a sensitive topic: {{COMPLIANCE_STANDARD}} violation (unencrypted data in transit).
+Synchronous cross-service HTTP call: if the target service is down → the whole operation fails → temporal coupling.
 
-## Règles
+## Rules
 
-**Delivery & DLQ :**
-- Topic à effet → `{{ACKS_CONFIG}}=all` + `enable.idempotence=true` (ou équivalent selon {{MESSAGE_BROKER}}).
-- Consumer à effet → commit **manuel** de l'offset **après** l'effet idempotent (fiche B-02).
-- Message poison → N échecs → Dead Letter Queue `{{DLQ_TOPIC}}` + alerte.
-- Topics critiques : `replicationFactor: {{REPLICATION_FACTOR}}`, `minInsyncReplicas: {{MIN_ISR}}`.
+**Delivery & DLQ:**
+- Side-effect topic → `acks=all` + producer idempotence enabled (or equivalent on {{MESSAGE_BROKER}}).
+- Side-effect consumer → **manual** commit **after** the idempotent effect (card B-02).
+- Poison message → N failures → Dead Letter Queue `{{DLQ_TOPIC}}` + alert.
+- Critical topics: `ReplicationFactor={{REPLICATION_FACTOR}}`, `MinInsyncReplicas={{MIN_ISR}}`.
 
-**Domain Events (découplage) :**
-- Appel HTTP synchrone pour notifier un autre service → remplacer par un événement de domaine sur {{MESSAGE_BROKER}}.
-- Pattern : service A publie `{{EVENT_NAME}}` → service B consomme (at-least-once + idempotence).
+**Domain events (decoupling):**
+- Synchronous HTTP call to notify another service → replace with a domain event on {{MESSAGE_BROKER}}.
+- Pattern: service A publishes `{{EVENT_NAME}}` → service B consumes (at-least-once + idempotence).
 
-**Chiffrement en transit :**
-- Topic sensible → `{{SECURITY_PROTOCOL}}=TLS` ou équivalent — jamais en clair.
-- Credentials → gestionnaire de secrets (fiche S-04).
+**In-transit encryption:**
+- Sensitive topic → TLS ({{SECURITY_PROTOCOL}}) — never plaintext.
+- Credentials → secret manager (card S-04).
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — producer sans garantie de delivery
-messagingClient.send("{{TOPIC}}", event); // acks=1 par défaut
+```csharp
+// ❌ BLOCKER — producer without delivery guarantee
+var conf = new ProducerConfig(); // Acks defaults to 1, no idempotence
+await _producer.ProduceAsync("{{TOPIC}}", message);
 
-// ❌ BLOCAGE — commit avant l'effet
-void handle({{EVENT}} event) {
-    // commit automatique AVANT l'effet → double traitement si crash
-    service.process(event);
+// ❌ BLOCKER — commit before the effect
+public async Task HandleAsync({{Event}} evt)
+{
+    await _consumer.CommitAsync(); // commit BEFORE the effect → double processing on crash
+    await _service.ProcessAsync(evt);
 }
 
-// ❌ BLOCAGE — topic sensible en clair
-{{SECURITY_PROTOCOL}}: PLAINTEXT
+// ❌ BLOCKER — sensitive topic in plaintext
+var conf = new ProducerConfig { SecurityProtocol = SecurityProtocol.Plaintext };
 ```
 
-## Pattern conforme
-```java
-// ✅ Producer à effet — delivery garantie
-@Bean
-ProducerFactory<String, Object> producerFactory() {
-    Map<String, Object> config = new HashMap<>();
-    config.put(ProducerConfig.ACKS_CONFIG, "all");
-    config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
-    config.put(ProducerConfig.SECURITY_PROTOCOL_CONFIG, "{{SECURITY_PROTOCOL}}");
-    return new DefaultKafkaProducerFactory<>(config);
-}
+## Compliant pattern
+```csharp
+// ✅ Side-effect producer — guaranteed delivery
+var conf = new ProducerConfig
+{
+    Acks = Acks.All,
+    EnableIdempotenceProducer = true,
+    SecurityProtocol = SecurityProtocol.SaslSsl, // TLS
+    SaslMechanism = SaslMechanism.ScramSha256
+};
 
-// ✅ Consumer — commit manuel APRÈS l'effet
-void handle({{EVENT}} event, Acknowledgment ack) {
-    if (!repository.existsBy(event.id())) { // idempotence (fiche B-02)
-        service.process(event);
-    }
-    ack.acknowledge(); // offset commité APRÈS l'effet
+// ✅ Consumer — manual commit AFTER the effect
+public async Task HandleAsync({{Event}} evt)
+{
+    if (!await _repository.ExistsByAsync(evt.Id)) // idempotence (card B-02)
+        await _service.ProcessAsync(evt);
+    await _consumer.CommitAsync(); // offset committed AFTER the effect
 }
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "{{SECURITY_PROTOCOL}}" config/ | grep "PLAINTEXT"` → 0 sur topics sensibles
-- [ ] Test : kill du consumer en cours → rejeu → 1 seul effet (at-least-once + idempotence)
-- [ ] Test : message poison → DLQ `{{DLQ_TOPIC}}` + alerte < 30 s
-- [ ] Test : connexion sans TLS → rejet
-- [ ] Topics à effet : replicationFactor={{REPLICATION_FACTOR}}, minInsyncReplicas={{MIN_ISR}}
+## CI/CD checklist
+- [ ] `rg "SecurityProtocol" config/ | rg -i "Plaintext"` → 0 on sensitive topics
+- [ ] Test: kill the consumer mid-processing → replay → 1 effect (at-least-once + idempotence)
+- [ ] Test: poison message → DLQ `{{DLQ_TOPIC}}` + alert < 30 s
+- [ ] Test: connection without TLS → rejected
+- [ ] Side-effect topics: ReplicationFactor={{REPLICATION_FACTOR}}, MinInsyncReplicas={{MIN_ISR}}

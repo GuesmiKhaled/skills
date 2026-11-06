@@ -1,71 +1,73 @@
 ---
 id: "D-03"
-titre: "Migration zero-downtime — schéma BDD & backward compatibility"
-severite: "🔴 BLOCAGE (migration qui casse la version en prod pendant le rollout)"
-applicable_si: [backend]
-declencheurs:
-  - "Toute migration qui renomme/supprime une colonne, modifie un type ou ajoute une contrainte NOT NULL"
-  - "Tout ALTER TABLE, DROP COLUMN, RENAME COLUMN dans {{MODULE_CIBLE}}"
-  - "Tout déploiement en rolling update avec changement de schéma BDD"
+title: "Zero-downtime migrations — DB schema & backward compatibility"
+severity: "🔴 BLOCKER (migration breaking the production version during rollout)"
+applies_to: [backend]
+triggers:
+  - "Any migration renaming/dropping a column, changing a type or adding a NOT NULL constraint"
+  - "Any ALTER TABLE, DROP COLUMN, RENAME COLUMN in {{MODULE_CIBLE}}"
+  - "Any rolling deployment with a DB schema change"
 version: "1.0"
 ---
 
-## Risque
-Rolling update : pendant {{ROLLOUT_DURATION}}, l'ancienne version du code et la nouvelle tournent en parallèle sur le même schéma BDD.
-Un `RENAME COLUMN` / `DROP COLUMN` casse l'ancienne version instantanément → erreurs en prod avant la fin du rollout → incident.
+## Risk
+Rolling update: during {{ROLLOUT_DURATION}}, the old and the new code versions run in parallel on the same DB schema.
+A `RENAME COLUMN` / `DROP COLUMN` breaks the old version instantly → errors in production before the rollout finishes → incident.
 
-## Règles
+## Rules
 
-**Stratégie expand-contract (toujours) :**
-1. **Expand** (migration V1) : ajouter la nouvelle colonne (nullable), copier les données, le nouveau code écrit dans les deux colonnes.
-2. **Contract** (migration V2, sprint suivante) : une fois l'ancienne version hors prod, supprimer/renommer l'ancienne colonne.
+**Expand-contract strategy (always):**
+1. **Expand** (migration V1): add the new column (nullable), backfill the data, the new code writes both columns.
+2. **Contract** (migration V2, next sprint): once the old version is out of prod, drop/rename the old column.
 
-**Règles spécifiques :**
-- Jamais de `NOT NULL` sans `DEFAULT` sur une colonne existante (verrou de table sur volume important).
-- `ADD COLUMN` → nullable ou avec `DEFAULT`.
-- `DROP COLUMN` → uniquement après que 100 % du trafic tourne sur la nouvelle version.
-- Index → `CREATE INDEX CONCURRENTLY` (pas de verrou exclusif de table).
-- Versioning : `V<version>__description.sql` — jamais modifier une migration déjà appliquée.
+**Specific rules:**
+- Never `NOT NULL` without `DEFAULT` on an existing column (table lock on large volume).
+- `ADD COLUMN` → nullable or with `DEFAULT`.
+- `DROP COLUMN` → only after 100% of traffic runs the new version.
+- Index → created online (PostgreSQL: `CONCURRENTLY`, SQL Server: `WITH (ONLINE = ON)`, Oracle: `ONLINE`) — no exclusive table lock.
+- Versioning: `YYYYMMDD_description` — never modify an already-applied migration.
 
 ## Anti-pattern
 ```sql
--- ❌ BLOCAGE — rename immédiat : casse l'ancienne version
+-- ❌ BLOCKER — immediate rename: breaks the old version
 ALTER TABLE {{TABLE}} RENAME COLUMN {{OLD_COLUMN}} TO {{NEW_COLUMN}};
 
--- ❌ BLOCAGE — NOT NULL sans DEFAULT (verrou long)
+-- ❌ BLOCKER — NOT NULL without DEFAULT (long lock)
 ALTER TABLE {{TABLE}} ADD COLUMN {{NEW_COLUMN}} {{TYPE}} NOT NULL;
 
--- ❌ BLOCAGE — index bloquant
+-- ❌ BLOCKER — blocking index
 CREATE INDEX idx_{{TABLE}}_{{COLUMN}} ON {{TABLE}}({{COLUMN}});
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```sql
--- ✅ Expand — V1 : nouvelle colonne nullable + copie
+-- ✅ Expand — V1: new nullable column + backfill
 ALTER TABLE {{TABLE}} ADD COLUMN {{NEW_COLUMN}} {{TYPE}};
 UPDATE {{TABLE}} SET {{NEW_COLUMN}} = {{OLD_COLUMN}};
--- Code V(n+1) écrit dans les deux colonnes
+-- Code V(n+1) writes both columns
 
--- ✅ Contract — V2 (sprint suivante, ancienne version hors prod)
+-- ✅ Contract — V2 (next sprint, old version out of prod)
 ALTER TABLE {{TABLE}} DROP COLUMN {{OLD_COLUMN}};
 
--- ✅ NOT NULL avec DEFAULT — pas de verrou
+-- ✅ NOT NULL with DEFAULT — no lock
 ALTER TABLE {{TABLE}} ADD COLUMN {{NEW_COLUMN}} {{TYPE}} NOT NULL DEFAULT {{DEFAULT_VALUE}};
 
--- ✅ Index non bloquant
-CREATE INDEX CONCURRENTLY idx_{{TABLE}}_{{COLUMN}} ON {{TABLE}}({{COLUMN}});
+-- ✅ Online index (per engine)
+CREATE INDEX CONCURRENTLY idx_{{TABLE}}_{{COLUMN}} ON {{TABLE}}({{COLUMN}});          -- PostgreSQL
+CREATE INDEX idx_{{TABLE}}_{{COLUMN}} ON {{TABLE}}({{COLUMN}}) WITH (ONLINE = ON);  -- SQL Server
+CREATE INDEX idx_{{TABLE}}_{{COLUMN}} ON {{TABLE}}({{COLUMN}}) ONLINE;              -- Oracle
 ```
 
 ```
-# Organisation des migrations — {{MIGRATION_TOOL}} (Flyway, Liquibase, Alembic...)
-migrations/
-  V{{DATE}}_01__add_{{NEW_COLUMN}}_to_{{TABLE}}.sql        (expand)
-  V{{DATE_NEXT_SPRINT}}_01__drop_{{OLD_COLUMN}}.sql        (contract)
+# Migration organization — {{MIGRATION_TOOL}} (EF Core migrations, Flyway, Liquibase...)
+Migrations/
+  20261106_01_add_{{NEW_COLUMN}}_to_{{TABLE}}.cs        (expand)
+  20261204_01_drop_{{OLD_COLUMN}}.cs                    (contract)
 ```
 
-## Checklist CI/CD
-- [ ] Toute migration testée en staging avec le code de la **version précédente** (simulation rolling update)
-- [ ] `grep -r "RENAME COLUMN\|DROP COLUMN" migrations/` → revue manuelle obligatoire (sprint précédente OK ?)
-- [ ] `grep -r "ADD COLUMN.*NOT NULL" migrations/ | grep -v "DEFAULT"` → 0
-- [ ] Index → `CREATE INDEX CONCURRENTLY` sur toutes les tables > {{MIN_TABLE_SIZE}} lignes
-- [ ] Rollback testé : revenir à la version précédente sans erreur de démarrage
+## CI/CD checklist
+- [ ] Every migration tested in staging with the **previous** code version (simulated rolling update)
+- [ ] `rg "RENAME|DropColumn|DropColumnAsync" Migrations/` → mandatory manual review (previous sprint OK?)
+- [ ] `rg "ADD COLUMN.*NOT NULL" migrations/ | rg -v "DEFAULT"` → 0
+- [ ] Index → online creation on every table > {{MIN_TABLE_SIZE}} rows
+- [ ] Rollback tested: return to the previous version without startup errors

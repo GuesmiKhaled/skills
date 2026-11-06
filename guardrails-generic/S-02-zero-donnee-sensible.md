@@ -1,63 +1,72 @@
 ---
 id: "S-02"
-titre: "Zéro donnée sensible — PII, secrets métier, logs, chiffrement applicatif"
-severite: "🔴 BLOCAGE absolu — jamais contournable"
-applicable_si: [backend, frontend]
-declencheurs:
-  - "Tout code traitant {{SENSITIVE_DATA_TYPE}} (PAN, IBAN, SSN, mot de passe, clé privée)"
-  - "Tout log.* sur un flux sensible dans {{MODULE_CIBLE}}"
-  - "Tout champ BDD, DTO, export mentionnant une donnée confidentielle"
-  - "Sérialisation JSON d'un objet sensible dans un log"
+title: "Zero sensitive data — PII, business secrets, logs, application-level encryption"
+severity: "🔴 absolute BLOCKER — never bypassable"
+applies_to: [backend, frontend]
+triggers:
+  - "Any code processing {{SENSITIVE_DATA_TYPE}} (PAN, IBAN, SSN, passwords, private keys)"
+  - "Any `_logger.*` call on a sensitive flow in {{MODULE_CIBLE}}"
+  - "Any DB field, DTO or export mentioning confidential data"
+  - "Any JSON serialization of a sensitive object in a log"
 version: "1.0"
 ---
 
-## Risque
-Une donnée {{SENSITIVE_DATA_TYPE}} dans les logs = scope d'audit élargi à toute la plateforme de logs → coût et risque de conformité.
-Un `SELECT {{SENSITIVE_FIELD}} FROM {{TABLE}}` lisible en clair = violation directe des règles de protection des données (RGPD, PCI-DSS, HIPAA selon le domaine).
+## Risk
+A {{SENSITIVE_DATA_TYPE}} value in the logs = audit scope widened to the whole logging platform → cost and compliance risk.
+A `SELECT {{SENSITIVE_FIELD}} FROM {{TABLE}}` readable in clear text = direct violation of data-protection rules (GDPR, PCI-DSS, HIPAA depending on the domain).
 
-## Règles
+## Rules
 
-**Données sensibles ({{SENSITIVE_DATA_TYPE}}) :**
-- Jamais en clair : code, BDD, logs, config, API, messages de file, tests (pas de données réelles en fixture).
-- Affichage autorisé : masque ou tronqué uniquement.
-- Stockage autorisé : token/référence externe ou colonne chiffrée.
+**Sensitive data ({{SENSITIVE_DATA_TYPE}}):**
+- Never in clear text: code, DB, logs, config, API, queue messages, tests (no real data in fixtures).
+- Display allowed: masked or truncated only.
+- Storage allowed: token/external reference or encrypted column.
 
-**Logs :**
-- Tout log sur un flux sensible → passer par un `SanitizedLogContext` (liste blanche de champs autorisés).
-- Champs autorisés dans les logs : `correlationId`, identifiants de référence opaques, codes de statut, montants masqués.
-- Jamais : `log.*(objetSensible)`, `.toString()` d'un objet sensible, sérialisation JSON d'un objet confidentiel.
-- `DEBUG`/`TRACE` désactivés sur le flux sensible en prod.
+**Logs:**
+- Every log on a sensitive flow → goes through a `SanitizedLogContext` (allowlist of permitted fields).
+- Fields permitted in logs: `correlationId`, opaque reference identifiers, status codes, masked amounts.
+- Never: `_logger.*(sensitiveObject)`, `ToString()` of a sensitive object, JSON serialization of a confidential object.
+- `DEBUG`/`Trace` disabled on the sensitive flow in production.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — donnée sensible dans un log
-log.info("User data: {}", userObject);            // contient des données personnelles
-log.error("Payment error: {}", paymentMessage);   // contient {{SENSITIVE_DATA_TYPE}}
+```csharp
+// ❌ BLOCKER — sensitive data in a log
+_logger.LogInformation("User data: {User}", userObject);         // contains personal data
+_logger.LogError("Payment error: {Msg}", paymentMessage);        // contains {{SENSITIVE_DATA_TYPE}}
 
-// ❌ BLOCAGE — donnée sensible lisible en BDD
-@Column(name = "{{SENSITIVE_FIELD}}")
-private String sensitiveField; // en clair
+// ❌ BLOCKER — sensitive data readable in the DB
+public class {{Entity}}
+{
+    [Column("{{SENSITIVE_FIELD}}")]
+    public string SensitiveField { get; set; } = null!; // in clear text
+}
 ```
 
-## Pattern conforme
-```java
-// ✅ Log avec liste blanche de champs autorisés
-log.warn("Operation failed", SanitizedLogContext.of(
+## Compliant pattern
+```csharp
+// ✅ Log with an allowlist of permitted fields
+_logger.LogWarning("Operation failed: {CorrelationId} {OpaqueId} {StatusCode} {ErrorCode}",
     correlationId,
-    reference.getOpaqueId(),   // identifiant opaque, pas la donnée sensible
-    response.getStatusCode(),
-    response.getPublicErrorCode()
-));
+    reference.OpaqueId,   // opaque identifier, not the sensitive data
+    response.StatusCode,
+    response.PublicErrorCode);
 
-// ✅ BDD — chiffrement transparent via converter
-@Convert(converter = {{ENCRYPTION_CONVERTER}}.class)
-@Column(name = "{{SENSITIVE_FIELD}}_encrypted")
-private String sensitiveField; // chiffré, lisible dans le code Java
+// ✅ DB — transparent encryption via an EF Core ValueConverter
+public class {{Entity}}
+{
+    [Column("{{SENSITIVE_FIELD}}_encrypted")]
+    public string SensitiveField { get; set; } = null!; // encrypted at rest
+}
+
+// ✅ OnModelCreating — register the converter
+builder.Entity<{{Entity}}>()
+    .Property(e => e.SensitiveField)
+    .HasConversion(new AesGcmValueConverter(Configuration["{{ENCRYPTION_KEY_ENV_VAR}}"]!));
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "log.*{{SENSITIVE_KEYWORD}}" src/` → 0 résultats
-- [ ] `SELECT {{SENSITIVE_FIELD}} FROM {{TABLE}} LIMIT 1` → résultat opaque/chiffré (test d'intégration)
-- [ ] `LogSanitizationTest` : capturer l'appender, asserter `doesNotContain(sensitiveValue)` sur chaque ligne
-- [ ] Pas de données réelles en fixture de test
-- [ ] `DEBUG`/`TRACE` désactivés sur le profil prod (vérifier la config de logging)
+## CI/CD checklist
+- [ ] `rg "_logger\..*{{SENSITIVE_KEYWORD}}" src/` → 0 results
+- [ ] `SELECT {{SENSITIVE_FIELD}} FROM {{TABLE}} LIMIT 1` → opaque/encrypted result (integration test)
+- [ ] `LogSanitizationTest`: capture the appender, assert the sensitive value is not in any line
+- [ ] No real data in test fixtures
+- [ ] `DEBUG`/`Trace` disabled on the production profile (verify the logging config)

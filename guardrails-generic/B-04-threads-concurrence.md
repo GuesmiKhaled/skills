@@ -1,92 +1,80 @@
 ---
 id: "B-04"
-titre: "Threads — Virtual Threads, pinning & sécurité de la concurrence"
-severite: "🔴 BLOCAGE (InterruptedException avalée / wait sans while) — 🟡 ALERTE"
-applicable_si: [backend]
-declencheurs:
-  - "Code I/O bloquant, synchronized, ThreadPoolExecutor, ThreadLocal dans {{MODULE_CIBLE}}"
-  - "Tout bloc try/catch sur InterruptedException"
-  - "Tout appel à Object.wait(), Thread.sleep(), await()"
-  - "Toute variable partagée entre threads sans synchronisation explicite"
-  - "SonarQube S2142 / S2274"
+title: "Concurrency — virtual threads, cancellation & thread-safety"
+severity: "🔴 BLOCKER (swallowed cancellation / sync-over-async) — 🟡 WARNING"
+applies_to: [backend]
+triggers:
+  - "Blocking I/O code, `lock`, `Thread.Sleep`, shared state in {{MODULE_CIBLE}}"
+  - "Any try/catch around `OperationCanceledException`"
+  - "Any `.Result` / `.Wait()` on async code"
+  - "Any variable shared between threads without explicit synchronization"
+  - "Roslyn CA2007 / CA2012 / Sonar S5693"
 version: "1.0"
 ---
 
-## Risque
-`InterruptedException` avalée → thread zombie au graceful shutdown → traitement en double à la reprise.
-`synchronized` sur I/O avec Virtual Threads → pinning du carrier thread → annule le bénéfice des VT (fiche B-07).
-`Object.wait()` dans un `if` → réveil spurieux → bug de concurrence silencieux.
+## Risk
+Swallowed cancellation (`TaskCanceledException` dropped) → zombie task at graceful shutdown → double processing on restart.
+`.Result`/`.Wait()` on async code → thread pool starvation → latency collapse on {{MODULE_CIBLE}}.
+`lock` around blocking I/O on .NET virtual threads → carrier pinning → virtual thread benefit cancelled (card B-07).
+Unprotected shared state → silent data race.
 
-## Règles
+## Rules
 
-**Virtual Threads (pinning) :**
-- `synchronized` sur un bloc I/O (BDD, réseau, file) → `ReentrantLock` (non-pinned en Java 21).
-- `ThreadPoolExecutor` de taille fixe pour l'I/O → exécuteur VT non borné.
-- `ThreadLocal` sans `remove()` → passer à `ScopedValue` ou documenter le cycle de vie.
+**Virtual threads & async (.NET 10):**
+- `.Result` / `.Wait()` / `Task.WaitAll` on the request path → BLOCKER: `await` end-to-end.
+- `lock` around blocking I/O (DB, network) with virtual threads → prefer `SemaphoreSlim` or cancellation-based APIs on hot paths.
+- Fixed-size thread pool for I/O → use `async/await` (the thread pool sizes itself).
 
-**Sécurité de la concurrence (Sonar S2142/S2274) :**
-- `InterruptedException` → **toujours** restaurer le flag : `Thread.currentThread().interrupt()` + return propre. Ou propager via `throws InterruptedException`.
-- `Object.wait()` → **toujours** dans un `while (condition)`, jamais dans un `if`.
-- Variable partagée mutable → `AtomicXxx`, `ConcurrentHashMap`, ou `volatile`.
+**Cancellation (Roslyn CA2007/CA2012):**
+- `OperationCanceledException` → **always** check `ct.IsCancellationRequested` and rethrow or return cleanly — never swallow.
+- `Task.Delay` / `Thread.Sleep` without a `CancellationToken` on critical paths → pass the token.
+- Mutable shared state → `Interlocked`, `ConcurrentDictionary<T,K>`, `volatile`, or `lock` with a short scope.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE S2142 — exception avalée, thread zombie
-try {
-    Thread.sleep(retryDelay);
-} catch (InterruptedException e) {
-    log.warn("Interrupted"); // flag perdu → thread ne s'arrête jamais proprement
+```csharp
+// ❌ BLOCKER CA2007 — swallowed cancellation, zombie task
+try
+{
+    await Task.Delay(retryDelay);
+}
+catch (TaskCanceledException)
+{
+    _logger.LogWarning("Interrupted"); // cancellation lost → task never stops cleanly
 }
 
-// ❌ BLOCAGE S2274 — réveil spurieux possible
-synchronized (lock) {
-    if (!ready) {
-        lock.wait(); // réveil spurieux → traitement prématuré
-    }
-}
+// ❌ BLOCKER — sync-over-async (thread pool starvation, possible deadlock)
+var items = _repository.GetItemsAsync(id).Result;
 
-// ❌ ALERTE — pinning du virtual thread
-synchronized (this) {
-    // appel I/O — bloque le carrier thread
-}
+// ❌ WARNING — blocking the thread on a critical path
+Thread.Sleep(1000); // blocks a thread; use Task.Delay with a token
 ```
 
-## Pattern conforme
-```java
-// ✅ InterruptedException — flag restauré
-try {
-    Thread.sleep(retryDelay);
-} catch (InterruptedException e) {
-    Thread.currentThread().interrupt(); // flag restauré
-    log.warn("Thread interrupted in {{MODULE_CIBLE}}, stopping processing");
-    return; // sortir proprement → graceful shutdown respecté
+## Compliant pattern
+```csharp
+// ✅ Cancellation — never swallowed
+try
+{
+    await Task.Delay(retryDelay, ct);
+}
+catch (OperationCanceledException) when (ct.IsCancellationRequested)
+{
+    _logger.LogWarning("Processing cancelled in {{MODULE_CIBLE}}, stopping cleanly");
+    throw; // rethrow (or return) → graceful shutdown respected
 }
 
-// ✅ wait() dans while — protège contre les réveils spurieux
-synchronized (lock) {
-    while (!ready) {
-        lock.wait(); // boucle obligatoire
-    }
-    process();
-}
+// ✅ await end-to-end — no .Result / .Wait()
+var items = await _repository.GetItemsAsync(id, ct);
 
-// ✅ ReentrantLock — non-pinned sur I/O avec Virtual Threads
-private final ReentrantLock lock = new ReentrantLock();
-lock.lock();
-try {
-    // appel I/O non-bloquant pour le carrier
-} finally {
-    lock.unlock();
-}
+// ✅ CancellationToken on delays
+await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
 
-// ✅ Variable partagée — AtomicLong
-private final AtomicLong counter = new AtomicLong(0);
-counter.incrementAndGet(); // atomique, sans synchronized
+// ✅ Shared state — atomic
+private int _counter;
+Interlocked.Increment(ref _counter); // atomic, no lock needed
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "catch (InterruptedException" src/ | grep -v "interrupt()"` → 0
-- [ ] `grep -r "\.wait()" src/` → vérifier que chaque occurrence est dans un `while`
-- [ ] Sonar S2142 et S2274 → "Resolved" ou "Safe", jamais "Won't Fix"
-- [ ] `grep -r "synchronized" src/ | grep -i "{{IO_KEYWORDS}}"` → remplacer par ReentrantLock
-- [ ] Test : thread interrompu → `interrupt()` restauré → scheduler s'arrête proprement
+## CI/CD checklist
+- [ ] `rg "catch\s*\(\s*TaskCanceledException" src/ | rg -v "IsCancellationRequested"` → 0
+- [ ] `rg "\.Result|\.Wait\(\)" src/ | rg -v "test"` → 0
+- [ ] Roslyn CA2007/CA2012 → 0 open issues
+- [ ] Test: cancelled task → scheduler stops cleanly (graceful shutdown honored)

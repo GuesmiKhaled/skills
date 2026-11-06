@@ -1,83 +1,85 @@
 ---
 id: "A-01"
-titre: "Clean Architecture — Isolation domaine, SRP/DIP & Ubiquitous Language"
-severite: "🔴 BLOCAGE (règle métier dans un adaptateur / import framework dans le domaine) — 🟡 ALERTE"
-applicable_si: [backend]
-declencheurs:
-  - "Toute classe mélangeant règle métier et framework dans {{MODULE_CIBLE}}"
-  - "Tout import framework dans le package domaine"
-  - "Toute classe faisant > 3 choses distinctes (SRP violé)"
-  - "Tout identifiant cryptique ou hors du glossaire métier {{DOMAIN_GLOSSARY}}"
+title: "Clean Architecture — Domain isolation, SRP/DIP & Ubiquitous Language"
+severity: "🔴 BLOCKER (business rule in an adapter / framework reference in the domain) — 🟡 WARNING"
+applies_to: [backend]
+triggers:
+  - "Any class mixing business rule and framework in {{MODULE_CIBLE}}"
+  - "Any framework using/reference in the Domain project"
+  - "Any class doing > 3 distinct things (SRP violated)"
+  - "Any cryptic identifier or name outside the {{DOMAIN_GLOSSARY}} business glossary"
 version: "1.0"
 ---
 
-## Risque
-Règle métier dans un contrôleur : test requiert un contexte d'intégration (lent, fragile), un changement de framework casse la règle.
-Nom cryptique (`trx`, `amt`) : un développeur met {{ONBOARDING_TIME}} à comprendre le modèle → erreur d'interprétation → bug métier.
+## Risk
+Business rule in a controller: the test requires a hosting context (slow, fragile), a framework change breaks the rule.
+Cryptic name (`trx`, `amt`): a developer takes {{ONBOARDING_TIME}} to understand the model → misinterpretation → business bug.
 
-## Règles
+## Rules
 
-**Isolation domaine :**
-- Règle métier ({{DOMAIN_RULES_EXAMPLES}}) → package `domain.*` sans aucun import framework (`{{FRAMEWORK_PACKAGES}}`).
-- Adaptateurs (Controller, Listener, Repository) → appellent la règle, jamais l'inverse.
-- Test de règle → 0 `{{INTEGRATION_TEST_ANNOTATION}}` (testable pur JUnit).
+**Domain isolation:**
+- Business rules ({{DOMAIN_RULES_EXAMPLES}}) → `Domain` project with zero framework references (`{{FRAMEWORK_PACKAGES}}`).
+- Adapters (controllers, consumers, repositories) → call the rule, never the other way around.
+- Rule test → 0 integration attributes (pure xUnit/NUnit, no host).
 
-**SRP / DIP :**
-- Une classe = une responsabilité (≤ 3 responsabilités, ≤ 300 lignes).
-- Dépendre d'abstractions : `{{GATEWAY_INTERFACE}}` (interface) jamais `{{GATEWAY_IMPL}}` (concrète).
-- Test avec > 3 mocks → signe SRP violé.
+**SRP / DIP:**
+- One class = one responsibility (≤ 3 responsibilities, ≤ 300 lines).
+- Depend on abstractions: `I{{GATEWAY_INTERFACE}}` (interface), never `{{GATEWAY_IMPL}}` (concrete).
+- A test with > 3 mocks → sign of SRP violated.
 
-**Ubiquitous Language :**
-- Glossaire obligatoire : `{{DOMAIN_TERMS}}`.
-- Interdit : `Manager`, `Helper`, `Util` sans suffixe précis, identifiants abrégés.
-- Convention casse : `camelCase` (variables), `PascalCase` (classes), `UPPER_SNAKE_CASE` (constantes).
+**Ubiquitous Language:**
+- Mandatory glossary: `{{DOMAIN_TERMS}}`.
+- Forbidden: `Manager`, `Helper`, `Util` without a precise qualifier, cryptic abbreviations.
+- Casing convention: `camelCase` (locals), `PascalCase` (types/members), `UpperCamelCase` (constants).
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — règle métier dans l'adaptateur
-@RestController
-class {{CONTROLLER}} {
-    @PostMapping("/{{ENDPOINT}}")
-    {{RESPONSE}} handle(@RequestBody {{COMMAND}} cmd) {
-        if (cmd.amount().compareTo({{LIMIT}}) > 0) // règle dans l'adaptateur !
-            throw new BusinessException("Refused");
-        return service.process(cmd);
-    }
+```csharp
+// ❌ BLOCKER — business rule in the adapter
+// Controllers/{{Controller}}.cs
+[HttpPost("/{{ENDPOINT}}")]
+public IActionResult Handle([FromBody] {{Command}} cmd)
+{
+    if (cmd.Amount > {{LIMIT}}) // rule in the adapter!
+        return BadRequest(new { error = "Refused" });
+    return Ok(_service.Process(cmd));
 }
 
-// ❌ ALERTE — nom cryptique + SRP violé
-class {{CRYPTIC_NAME}}Svc {
-    void calc{{CRYPTIC_FIELD}}(Object usr, Object trx) { ... }
-}
-```
-
-## Pattern conforme
-```java
-// ✅ Règle dans le domaine
-// domain/{{DOMAIN_PACKAGE}}/{{RULE_CLASS}}.java — 0 import framework
-public record {{RULE_CLASS}}(BigDecimal limit) {
-    public void validate(BigDecimal amount) {
-        if (amount.compareTo(limit) > 0)
-            throw new {{RULE_EXCEPTION}}(amount, limit);
-    }
-}
-
-// adapter/http/{{CONTROLLER}}.java
-@RestController
-class {{CONTROLLER}} {
-    private final {{RULE_CLASS}} rule;        // dépendance au domaine
-    private final {{GATEWAY_INTERFACE}} gw;   // abstraction
-
-    @PostMapping("/{{ENDPOINT}}")
-    {{RESPONSE}} handle(@RequestBody @Valid {{COMMAND}} cmd) {
-        rule.validate(cmd.amount());           // règle depuis l'adaptateur
-        return gw.process(cmd);
-    }
+// ❌ WARNING — cryptic name + SRP violated
+public class {{CRYPTIC_NAME}}Svc
+{
+    public void Calc{{CRYPTIC_FIELD}}(object usr, object trx) { ... }
 }
 ```
 
-## Checklist CI/CD
-- [ ] ArchUnit : `noClasses().that().resideInPackage("..domain..")` → `dependOnClassesThat().resideInPackage("{{FRAMEWORK_PACKAGES}}")`
-- [ ] Test de règle `{{RULE_CLASS}}Test` → 0 `{{INTEGRATION_TEST_ANNOTATION}}`, exécution < 100 ms
-- [ ] `grep -r "import {{FRAMEWORK_PACKAGES}}" src/main/java/**/domain/` → 0
-- [ ] `grep -r "class.*Manager\|class.*Helper\|class.*Util" src/ | grep -v "//"` → revue manuelle
+## Compliant pattern
+```csharp
+// ✅ Rule in the domain
+// Domain/{{DomainPackage}}/{{RuleClass}}.cs — 0 framework references
+public sealed record {{RuleClass}}(decimal Limit)
+{
+    public void Validate(decimal amount)
+    {
+        if (amount > Limit)
+            throw new {{RuleException}}(amount, Limit);
+    }
+}
+
+// ✅ Adapters/Controllers/{{Controller}}.cs
+public class {{Controller}}(
+    {{RuleClass}} rule,          // dependency on the domain
+    I{{GatewayInterface}} gw)    // abstraction
+{
+    [HttpPost("/{{ENDPOINT}}")]
+    public async Task<IActionResult> Handle([FromBody] [FromBody: Validator] {{Command}} cmd)
+    {
+        rule.Validate(cmd.Amount);  // rule from the domain
+        return Ok(await gw.ProcessAsync(cmd));
+    }
+}
+```
+
+## CI/CD checklist
+- [ ] Architecture test (NetArchTest/ArchUnitNET): `NoTypes().That().AreInNamespace("..Domain..")` → no dependency on `{{FRAMEWORK_PACKAGES}}`
+- [ ] Rule test `{{RuleClass}}Test` → 0 integration attributes, run < 100 ms
+- [ ] `rg "using Microsoft\.(AspNetCore|EntityFrameworkCore)" Domain/` → 0
+- [ ] `rg "class .*Manager|class .*Helper|class .*Util" src/ | rg -v "//"` → manual review

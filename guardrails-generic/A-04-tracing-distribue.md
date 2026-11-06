@@ -1,89 +1,87 @@
 ---
 id: "A-04"
-titre: "Tracing distribué — correlationId & propagation inter-services"
-severite: "🔴 BLOCAGE (log sur flux critique sans correlationId) — 🟡 ALERTE"
-applicable_si: [backend]
-declencheurs:
-  - "Tout endpoint qui initie un flux multi-services dans {{MODULE_CIBLE}}"
-  - "Tout appel inter-services (HTTP, messaging) sans propagation de correlationId"
-  - "Tout log sur un flux critique sans identifiant de corrélation"
+title: "Distributed tracing — correlationId & cross-service propagation"
+severity: "🔴 BLOCKER (log on critical flow without correlationId) — 🟡 WARNING"
+applies_to: [backend]
+triggers:
+  - "Any endpoint initiating a multi-service flow in {{MODULE_CIBLE}}"
+  - "Any cross-service call (HTTP, messaging) without correlationId propagation"
+  - "Any log on a critical flow without a correlation identifier"
 version: "1.0"
 ---
 
-## Risque
-Sans correlationId : un incident P1 en prod → recherche du flux dans les logs → impossible de relier les logs de {{SERVICE_COUNT}} services différents → debug impossible sans corrélation.
-MDC non propagé aux threads de messaging → le correlationId disparaît entre les services → traçabilité perdue.
+## Risk
+Without correlationId: a P1 incident in production → searching the flow in the logs → impossible to tie together the logs of {{SERVICE_COUNT}} different services → debugging impossible without correlation.
+Scope not propagated to messaging consumers → the correlationId disappears between services → traceability lost.
 
-## Règles
+## Rules
 
-- Tout endpoint entrant → `correlationId` dans le MDC en début de traitement.
-- Priorité : en-tête `{{CORRELATION_HEADER}}` entrant → sinon UUID v4 généré.
-- Propagé : appels HTTP sortants (en-tête `{{CORRELATION_HEADER}}`) + messages (header `{{CORRELATION_HEADER}}`).
-- MDC nettoyé en fin de requête (`try/finally`) — sinon fuite entre requêtes (pool de threads).
-- Format de log : `correlationId` présent dans chaque ligne du flux critique.
+- Every incoming endpoint → `correlationId` in the log scope at the start of processing.
+- Priority: incoming `{{CORRELATION_HEADER}}` header → otherwise a generated UUIDv4.
+- Propagated: outgoing HTTP calls (header `{{CORRELATION_HEADER}}`) + messages (header `{{CORRELATION_HEADER}}`) + W3C `traceparent` (via `Activity`).
+- Scope disposed at the end of the request (`using`/`finally`) — otherwise leakage between requests (thread pool).
+- Log format: `correlationId` present on every line of the critical flow.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — log critique sans correlationId
-log.info("Operation completed for entity {}", entityId);
-// → impossible de relier ce log à un flux spécifique lors d'un incident
+```csharp
+// ❌ BLOCKER — critical log without correlationId
+_logger.LogInformation("Operation completed for entity {EntityId}", entityId);
+// → impossible to tie this log to a specific flow during an incident
 
-// ❌ ALERTE — MDC non nettoyé (fuite dans le pool de threads)
-MDC.put("correlationId", id);
-// (pas de finally pour le retirer)
+// ❌ WARNING — scope pushed but never disposed (leak in the thread pool)
+var scope = _logger.BeginScope(new Dictionary<string, object?> { ["correlationId"] = id });
+// (no Dispose → scope leaks across pooled threads)
 ```
 
-## Pattern conforme
-```java
-// ✅ Filtre MDC — intercepte toutes les requêtes
-@Component
-public class CorrelationIdFilter extends OncePerRequestFilter {
-    @Override protected void doFilterInternal(HttpServletRequest req, ...) {
-        String correlationId = Optional.ofNullable(req.getHeader("{{CORRELATION_HEADER}}"))
-            .filter(s -> !s.isBlank())
-            .orElse(UUID.randomUUID().toString());
+## Compliant pattern
+```csharp
+// ✅ Correlation middleware — intercepts every request
+public sealed class CorrelationIdMiddleware(ILogger<CorrelationIdMiddleware> logger, RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var header = context.Request.Headers["{{CORRELATION_HEADER}}"].FirstOrDefault();
+        var correlationId = string.IsNullOrWhiteSpace(header) ? Guid.NewGuid().ToString() : header!;
 
-        MDC.put("correlationId", correlationId);
-        resp.setHeader("{{CORRELATION_HEADER}}", correlationId);
-        try {
-            chain.doFilter(req, resp);
-        } finally {
-            MDC.remove("correlationId"); // nettoyage obligatoire
+        context.Response.Headers["{{CORRELATION_HEADER}}"] = correlationId;
+
+        using (logger.BeginScope(new Dictionary<string, object?> { ["correlationId"] = correlationId }))
+        {
+            await next(context); // scope disposed at the end (mandatory)
         }
     }
 }
 
-// ✅ Propagation appel HTTP sortant
-restClient.get()
-    .header("{{CORRELATION_HEADER}}", MDC.get("correlationId"))
-    .retrieve()...
+// ✅ Outgoing HTTP call propagation
+var request = new HttpRequestMessage(HttpMethod.Post, url)
+{
+    Headers = { { "{{CORRELATION_HEADER}}", Activity.Current?.Id ?? correlationId } }
+};
+await _httpClient.SendAsync(request);
 
-// ✅ Propagation message
-messagingClient.send(MessageBuilder
-    .withPayload(event)
-    .setHeader("{{CORRELATION_HEADER}}", MDC.get("correlationId"))
-    .build());
+// ✅ Message propagation
+var message = new Message(payload) { ApplicationProperties = { ["{{CORRELATION_HEADER}}"] = correlationId } };
+await _producer.ProduceAsync(topic, message);
 
-// ✅ Consumer de messages — restauration du MDC
-void handle({{MESSAGE_TYPE}} msg, {{ACK_TYPE}} ack) {
-    String corrId = extractCorrelationId(msg).orElse(UUID.randomUUID().toString());
-    MDC.put("correlationId", corrId);
-    try {
-        processMessage(msg);
-    } finally {
-        MDC.remove("correlationId");
+// ✅ Message consumer — restore the scope
+public async Task HandleAsync({{MessageType}} msg)
+{
+    var corrId = msg.ApplicationProperties.TryGetValue("{{CORRELATION_HEADER}}", out var v)
+        ? v.ToString() : Guid.NewGuid().ToString();
+    using (_logger.BeginScope(new Dictionary<string, object?> { ["correlationId"] = corrId }))
+    {
+        await _processor.ProcessMessageAsync(msg);
     }
-    ack.acknowledge();
 }
 ```
 
 ```
-# Format de log — correlationId dans chaque ligne
-{{LOG_PATTERN}} = %d{ISO8601} [%X{correlationId}] %-5level %logger - %msg%n
+# Log format — correlationId on every line (structured logging / Serilog)
+{{LOG_PATTERN}} = {Timestamp:iso8601} [{Level:u3}] {Message:lj} [correlationId:{correlationId}] @l
 ```
 
-## Checklist CI/CD
-- [ ] Appel à `{{EXAMPLE_ENDPOINT}}` → réponse avec header `{{CORRELATION_HEADER}}` présent
-- [ ] Log du flux → chaque ligne contient `[<uuid>]` (MDC)
-- [ ] Test : appel sans `{{CORRELATION_HEADER}}` → UUID généré et propagé à tous les services du flux
-- [ ] `grep -r "MDC.put" src/ | grep -v "MDC.remove"` → vérifier que chaque `put` a son `remove` dans un `finally`
+## CI/CD checklist
+- [ ] Call to `{{EXAMPLE_ENDPOINT}}` → response with the `{{CORRELATION_HEADER}}` header present
+- [ ] Flow logs → every line contains `[<uuid>]` (scope property)
+- [ ] Test: call without `{{CORRELATION_HEADER}}` → UUID generated and propagated to every service in the flow
+- [ ] `rg "BeginScope" src/` → verify every push has a Dispose in `using`/`finally`

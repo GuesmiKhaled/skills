@@ -1,69 +1,65 @@
 ---
 id: "B-01"
-titre: "Money Safety — BigDecimal, comparaison & arrondis"
-severite: "🔴 BLOCAGE absolu"
-applicable_si: [backend]
-declencheurs:
-  - "Tout calcul de montant dans {{MODULE_CIBLE}} : fee, total, solde, remboursement"
-  - "Champs float/double/int portant un montant financier"
-  - "Comparaison de montants avec == ou .equals() sans compareTo"
+title: "Money safety — decimal, comparison & rounding"
+severity: "🔴 absolute BLOCKER"
+applies_to: [backend]
+triggers:
+  - "Any amount calculation in {{MODULE_CIBLE}}: fee, total, balance, refund"
+  - "float/double/int/long fields carrying a financial amount"
+  - "Any amount flowing through float/double (implicit conversion)"
 version: "1.0"
 ---
 
-## Risque
-`float` + `double` sont des approximations binaires : `0.1 + 0.2 ≠ 0.3` en virgule flottante IEEE 754.
-Sur un montant de {{TRANSACTION_VOLUME}} × {{UNIT_AMOUNT}} → écart comptable cumulé non justifiable à l'audit.
+## Risk
+`float` and `double` are binary approximations: `0.1 + 0.2 ≠ 0.3` in IEEE 754 floating point.
+On a volume of {{TRANSACTION_VOLUME}} × {{UNIT_AMOUNT}} → cumulative accounting drift, unexplainable at audit.
 
-## Règles
+## Rules
 
-- Tout montant financier dans {{MODULE_CIBLE}} → `BigDecimal` obligatoire.
-- `float`/`double`/`int`/`long` sur un montant → BLOCAGE immédiat.
-- Arrondi → `RoundingMode` explicite toujours précisé.
-  - Règle générale : `HALF_UP` ; Calculs fiscaux : `HALF_EVEN`.
-- Comparaison → `compareTo()` uniquement — jamais `==` ni `.equals()` sur BigDecimal.
-- Constructeur → `new BigDecimal("10.50")` (String) — jamais `new BigDecimal(10.50)` (double approximé).
-- DTO/Command → `BigDecimal` avec `@DecimalMin("0.01")` (fiche S-06).
+- Every financial amount in {{MODULE_CIBLE}} → `decimal` (C#) mandatory.
+- `float`/`double`/`int`/`long` on an amount → immediate BLOCKER.
+- Rounding → explicit mode always specified.
+  - General rule: `MidpointRounding.AwayFromZero` (HALF_UP); tax calculations: `MidpointRounding.ToEven` (HALF_EVEN).
+- Comparison → `decimal` operators are exact; never let an amount pass through `float`/`double`.
+- Parsing → `decimal.Parse("10.50", CultureInfo.InvariantCulture)` — never a `float`/`double` intermediate.
+- DTO/Command → `decimal` with `[Range(0.01, ...)]` (card S-06).
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — float sur un montant
+```csharp
+// ❌ BLOCKER — float on an amount
 double total = 0.1 + 0.2; // = 0.30000000000000004
 
-// ❌ BLOCAGE — constructeur double
-BigDecimal amount = new BigDecimal(10.50); // ≠ 10.50 exact
+// ❌ BLOCKER — double round-trip
+decimal amount = (decimal)rawDouble; // binary noise baked in
 
-// ❌ BLOCAGE — .equals() sur BigDecimal
-if (refund.equals(originalAmount)) { ... }
-// BigDecimal("10.50").equals(BigDecimal("10.5")) = false !
+// ❌ BLOCKER — implicit precision loss
+decimal fee = amount * feeRate; // feeRate is double → conversion loses precision
 
-// ❌ BLOCAGE — arrondi implicite
-BigDecimal fee = amount.multiply(rate); // arrondi indéfini
+// ❌ BLOCKER — implicit rounding
+decimal fee = amount * rate; // no explicit scale/rounding
 ```
 
-## Pattern conforme
-```java
-// ✅ BigDecimal depuis String
-BigDecimal amount = new BigDecimal("{{AMOUNT_VALUE}}");
+## Compliant pattern
+```csharp
+// ✅ decimal from string (exact)
+var amount = decimal.Parse("{{AMOUNT_VALUE}}", CultureInfo.InvariantCulture);
 
-// ✅ Calcul avec RoundingMode explicite
-BigDecimal fee = amount
-    .multiply(feeRate)
-    .setScale(2, RoundingMode.HALF_UP);
+// ✅ Calculation with explicit rounding
+var fee = Math.Round(amount * feeRate, 2, MidpointRounding.AwayFromZero);
 
-// ✅ Comparaison avec compareTo
-if (refund.compareTo(originalAmount) > 0) {
+// ✅ Comparison on decimal (exact)
+if (refund > originalAmount)
     throw new BusinessException("{{REFUND_EXCEEDS_ORIGINAL_MESSAGE}}");
-}
 
-// ✅ DTO avec contrainte
-record {{COMMAND}}(
-    @NotNull @DecimalMin("0.01") BigDecimal amount,
-    @NotBlank String currency
-) {}
+// ✅ DTO with constraint
+public sealed record {{Command}}(
+    [property: Required, property: Range(0.01, double.MaxValue)] decimal Amount,
+    [property: Required] string Currency
+);
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "float\|double" src/main/ | grep -i "amount\|fee\|balance\|total"` → 0
-- [ ] `grep -r "new BigDecimal([0-9]" src/` → 0 (constructeur double interdit)
-- [ ] `grep -r "\.equals(" src/ | grep -i "bigdecimal\|amount\|fee"` → 0
-- [ ] Test mutation : comparaison `> 0` → mutant `>= 0` tué par le test de bordure exacte
+## CI/CD checklist
+- [ ] `rg "(float|double)" src/ | rg -i "amount|fee|balance|total"` → 0
+- [ ] `rg "\(\s*(decimal|float|double)\s*\)\s*\w*[Aa]mount" src/` → 0 (no double↔decimal round-trip)
+- [ ] `rg "Math\.Round\([^,)]*\)" src/` → 0 (every rounding has an explicit mode)
+- [ ] Mutation test: boundary comparison `> 0` → mutant `>= 0` killed by the exact-boundary test

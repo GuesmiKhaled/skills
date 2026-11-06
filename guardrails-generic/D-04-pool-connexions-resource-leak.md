@@ -1,83 +1,79 @@
 ---
 id: "D-04"
-titre: "Pool de connexions & resource leak"
-severite: "🔴 BLOCAGE (connexion/stream non fermé) — 🟡 ALERTE (pool mal dimensionné)"
-applicable_si: [backend]
-declencheurs:
-  - "Tout code ouvrant une connexion BDD, un fichier, un stream ou une ressource réseau"
-  - "Toute configuration de pool de connexions ({{CONNECTION_POOL_LIB}}) dans {{MODULE_CIBLE}}"
-  - "SonarQube issue S2095 (Resource should be closed)"
+title: "Connection pool & resource leak"
+severity: "🔴 BLOCKER (un-closed connection/stream) — 🟡 WARNING (mis-sized pool)"
+applies_to: [backend]
+triggers:
+  - "Any code opening a DB connection, file, stream or network resource"
+  - "Any connection pool configuration ({{CONNECTION_POOL_LIB}}) in {{MODULE_CIBLE}}"
+  - "Roslyn CA2000/CA2201 / Sonar (resource should be closed)"
 version: "1.0"
 ---
 
-## Risque
-Une connexion non fermée dans un catch block → fuite silencieuse → le pool se vide progressivement → timeout en cascade sur tous les endpoints de {{MODULE_CIBLE}} → P1.
-Pool sous-dimensionné → queue de connexions → latence p99 qui explose sous charge.
+## Risk
+A connection not closed in a catch block → silent leak → the pool empties gradually → cascading timeouts on every endpoint of {{MODULE_CIBLE}} → P1.
+Under-sized pool → connection queue → p99 latency explodes under load.
 
-## Règles
+## Rules
 
-- Tout resource (`Connection`, `ResultSet`, `Statement`, `InputStream`, `OutputStream`, `Channel`) → `try-with-resources`.
-- Jamais de `.close()` manuel dans un `finally` séparé (oublié dans les exceptions).
-- `{{CONNECTION_POOL_LIB}}` : `leakDetectionThreshold={{LEAK_DETECTION_THRESHOLD}}` en dev.
-- Dimensionnement : `maximumPoolSize = {{POOL_SIZE_FORMULA}}` (ajusté par benchmark).
-- `connectionTimeout ≤ {{CONNECTION_TIMEOUT}}` sur un endpoint à SLO défini.
-- Jamais d'appel réseau/message **dans** une transaction BDD ouverte (verrou détenu le temps de l'appel).
+- Every `IDisposable`/`IAsyncDisposable` resource (`SqlConnection`, `DbDataReader`, `Stream`, `HttpClient`) → `using` / `await using`.
+- Never a manual `.Dispose()` in a separate `finally` (forgotten on the exception path).
+- `{{CONNECTION_POOL_LIB}}`: enable leak detection/pool diagnostics in dev.
+- Sizing: `Max Pool Size = {{POOL_SIZE_FORMULA}}` (tuned by benchmark).
+- `Connect Timeout ≤ {{CONNECTION_TIMEOUT}}` on SLO endpoints.
+- Never a network/messaging call **inside** an open DB transaction (lock held for the whole call).
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE S2095 — connexion non fermée si exception
-Connection conn = dataSource.getConnection();
-PreparedStatement ps = conn.prepareStatement(sql);
-ResultSet rs = ps.executeQuery();
-// Si rs.next() lève une exception → conn jamais fermée → fuite
+```csharp
+// ❌ BLOCKER CA2000 — reader not closed if an exception is thrown
+using var conn = new SqlConnection(connectionString);
+conn.Open();
+using var cmd = new SqlCommand(sql, conn);
+var reader = cmd.ExecuteReader(); // if Read() throws → reader never closed → leak
 
-// ❌ ALERTE — appel réseau dans @Transactional
-@Transactional
-public {{RESULT}} process({{ID}} id) {
-    {{ENTITY}} e = repository.findById(id); // connexion + verrou
-    {{RESPONSE}} r = {{EXTERNAL_CLIENT}}.call(e); // appel réseau {{EXTERNAL_TIMEOUT}} → verrou détenu ∞
-    e.setResult(r.getValue());
-    return repository.save(e);
+// ❌ WARNING — network call inside a transaction
+using var tx = _db.Database.BeginTransaction();
+var e = await _repo.FindAsync(id);              // connection + lock held
+var r = await _externalClient.CallAsync(e);     // network call while the lock is held
+e.Result = r.Value;
+await _db.SaveChangesAsync();
+```
+
+## Compliant pattern
+```csharp
+// ✅ using — disposal guaranteed
+await using var conn = new SqlConnection(connectionString);
+await conn.OpenAsync();
+await using var cmd = new SqlCommand(sql, conn);
+await using var reader = await cmd.ExecuteReaderAsync();
+while (await reader.ReadAsync()) { /* processing */ }
+// conn, cmd, reader disposed automatically even on exception
+
+// ✅ Network call OUTSIDE the transaction — short scope
+public async Task<{{Result}}> ProcessAsync({{Id}} id)
+{
+    var e = await _repo.FindAsync(id);            // short read
+    var r = await _externalClient.CallAsync(e);   // network call outside the transaction
+    return await PersistResultAsync(id, r);        // short transaction
+}
+
+public async Task<{{Result}}> PersistResultAsync({{Id}} id, {{Response}} r)
+{
+    var e = await _repo.FindAsync(id);
+    e.Result = r.Value;
+    return await _db.SaveChangesAsync(); // < {{TRANSACTION_TIMEOUT}}
 }
 ```
 
-## Pattern conforme
-```java
-// ✅ try-with-resources — fermeture garantie
-try (Connection conn = dataSource.getConnection();
-     PreparedStatement ps = conn.prepareStatement(sql);
-     ResultSet rs = ps.executeQuery()) {
-    while (rs.next()) { /* traitement */ }
-} // conn, ps, rs fermés automatiquement même en cas d'exception
-
-// ✅ Appel réseau HORS transaction — transaction courte
-public {{RESULT}} process({{ID}} id) {
-    {{ENTITY}} e = repository.findById(id);          // lecture hors transaction longue
-    {{RESPONSE}} r = {{EXTERNAL_CLIENT}}.call(e);    // appel réseau hors transaction
-    return persistResult(id, r);                      // transaction courte
-}
-
-@Transactional(timeout = {{TRANSACTION_TIMEOUT}})
-{{RESULT}} persistResult({{ID}} id, {{RESPONSE}} r) {
-    {{ENTITY}} e = repository.findById(id);
-    e.setResult(r.getValue());
-    return mapper.toResult(repository.save(e));
-}
+```csharp
+// ✅ Sized pool — connection string (SQL Server example)
+// Server={{DB_HOST}};Database={{DB_NAME}};Max Pool Size={{MAX_POOL_SIZE}};
+// Min Pool Size={{MIN_IDLE}};Connect Timeout={{CONNECTION_TIMEOUT}}
 ```
 
-```yaml
-# ✅ Pool dimensionné — {{CONNECTION_POOL_LIB}}
-datasource:
-  hikari:
-    maximum-pool-size: {{MAX_POOL_SIZE}}
-    minimum-idle: {{MIN_IDLE}}
-    connection-timeout: {{CONNECTION_TIMEOUT}}
-    leak-detection-threshold: {{LEAK_DETECTION_THRESHOLD}}
-```
-
-## Checklist CI/CD
-- [ ] Sonar S2095 → 0 issue ouverte sur les classes d'accès BDD de {{MODULE_CIBLE}}
-- [ ] `grep -r "\.getConnection()" src/ | grep -v "try ("` → 0
-- [ ] Test de charge {{LOAD_DURATION}} : pool `ActiveConnections` ne monte pas indéfiniment
-- [ ] `leakDetectionThreshold` activé en staging → 0 alerte de fuite
-- [ ] `connectionTimeout={{CONNECTION_TIMEOUT}}` → test : BDD down → endpoint répond en < {{TIMEOUT_RESPONSE}} ms
+## CI/CD checklist
+- [ ] Roslyn CA2000/CA2201 → 0 open issues on the data-access classes of {{MODULE_CIBLE}}
+- [ ] `rg "new SqlCommand|new StreamReader|new FileStream" src/ | rg -v "using"` → 0
+- [ ] Load test {{LOAD_DURATION}}: `ActiveConnections` does not grow indefinitely
+- [ ] Pool diagnostics enabled in staging → 0 leak alerts
+- [ ] `Connect Timeout={{CONNECTION_TIMEOUT}}` → test: DB down → endpoint responds in < {{TIMEOUT_RESPONSE}} ms

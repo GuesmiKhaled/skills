@@ -1,74 +1,73 @@
 ---
 id: "A-02"
-titre: "Backward Compatibility API — zéro breaking change sans versioning"
-severite: "🔴 BLOCAGE (breaking change sur API en production)"
-applicable_si: [backend, frontend]
-declencheurs:
-  - "Toute modification de contrat API dans {{MODULE_CIBLE}} : suppression/renommage/changement de type"
-  - "Tout nouveau endpoint ou nouvelle version d'un endpoint existant"
-  - "Toute dépréciation d'un champ ou endpoint utilisé en production"
+title: "API backward compatibility — zero breaking change without versioning"
+severity: "🔴 BLOCKER (breaking change on a production API)"
+applies_to: [backend, frontend]
+triggers:
+  - "Any API contract change in {{MODULE_CIBLE}}: field removal/renaming/type change"
+  - "Any new endpoint or new version of an existing endpoint"
+  - "Any deprecation of a field or endpoint used in production"
 version: "1.0"
 ---
 
-## Risque
-Un champ supprimé ou renommé dans une API utilisée en production → erreur de désérialisation dès le déploiement → incident client.
-Un changement de type (`string` → `int`) sur un champ → perte silencieuse de données côté consommateur.
+## Risk
+A field removed or renamed in an API used in production → deserialization errors as soon as deployed → client incident.
+A type change (`string` → `int`) on a field → silent data loss on the consumer side.
 
-## Règles
+## Rules
 
-**Breaking changes interdits sans versioning :**
-- Supprimer un champ → BLOCAGE : déprécier d'abord, supprimer après {{DEPRECATION_PERIOD}}.
-- Renommer un champ → BLOCAGE : ajouter le nouveau nom, garder l'ancien (déprécié).
-- Changer le type d'un champ → BLOCAGE : nouveau champ + migration côté client.
-- Rendre un champ `required` qui était optionnel → BLOCAGE.
+**Breaking changes forbidden without versioning:**
+- Remove a field → BLOCKER: deprecate first, remove after {{DEPRECATION_PERIOD}}.
+- Rename a field → BLOCKER: add the new name, keep the old one (deprecated).
+- Change a field's type → BLOCKER: new field + client-side migration.
+- Make an optional field `required` → BLOCKER.
 
-**Évolutions non-breaking (autorisées) :**
-- Ajouter un nouveau champ optionnel.
-- Ajouter un nouveau endpoint.
-- Ajouter une nouvelle valeur d'enum (si le client ignore les inconnues).
+**Non-breaking evolutions (allowed):**
+- Add a new optional field.
+- Add a new endpoint.
+- Add a new enum value (if the client ignores unknown values).
 
-**Versioning :**
-- Breaking change inévitable → versioning par path : `/v1/{{ENDPOINT}}` → `/v2/{{ENDPOINT}}`.
-- `Sunset` header sur les endpoints v1 dépréciés (RFC 8594) : `Sunset: {{SUNSET_DATE}}`.
-- Maintenir au max {{MAX_PARALLEL_VERSIONS}} versions simultanées.
+**Versioning:**
+- Unavoidable breaking change → path versioning: `/v1/{{ENDPOINT}}` → `/v2/{{ENDPOINT}}`.
+- `Sunset` header on deprecated v1 endpoints (RFC 8594): `Sunset: {{SUNSET_DATE}}`.
+- At most {{MAX_PARALLEL_VERSIONS}} versions in parallel.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — champ renommé en place
-public record {{RESPONSE_TYPE}}(
-    UUID id,
-    BigDecimal totalAmount,  // était "amount" — casse tous les clients existants
-    String status
-) {}
+```csharp
+// ❌ BLOCKER — field renamed in place
+public record {{ResponseType}}(
+    Guid Id,
+    decimal TotalAmount,  // was "amount" — breaks every existing client
+    string Status
+);
 ```
 
-## Pattern conforme
-```java
-// ✅ Champ déprécié conservé + nouveau champ ajouté
-public record {{RESPONSE_TYPE}}(
-    UUID id,
-    @Deprecated {{FIELD_TYPE}} {{OLD_FIELD}},  // maintenu pour les anciens clients
-    {{FIELD_TYPE}} {{NEW_FIELD}},              // nouveau nom — parallèle
-    String status
-) {}
+## Compliant pattern
+```csharp
+// ✅ Deprecated field kept + new field added
+public record {{ResponseType}}(
+    Guid Id,
+    [Obsolete("Renamed to {{NEW_FIELD}}. Remove after {{SUNSET_DATE}}.")] {{FieldType}} OldField,  // kept for old clients
+    {{FieldType}} NewField,  // new name — in parallel
+    string Status
+);
 
-// ✅ Versioning par path
-@RestController @RequestMapping("/v2/{{ENDPOINT}}")
-class {{CONTROLLER_V2}} { /* Nouvelle implémentation */ }
+// ✅ Path versioning — route groups
+var v2 = app.MapGroup("/v2/{{ENDPOINT}}");
+v2.Post("/", HandleV2); // new implementation
 
-// ✅ Sunset header sur v1
-@GetMapping("/v1/{{ENDPOINT}}/{id}")
-ResponseEntity<{{RESPONSE_V1}}> getV1(...) {
-    return ResponseEntity.ok()
-        .header("Sunset", "{{SUNSET_DATE}}")
-        .header("Deprecation", "true")
-        .body(serviceV1.find(id));
-}
+// ✅ Sunset header on v1
+app.MapGet("/v1/{{ENDPOINT}}/{id}", (Guid id, HttpContext ctx, I{{GatewayInterfaceV1}} serviceV1) =>
+{
+    ctx.Response.Headers["Sunset"] = "{{SUNSET_DATE}}";
+    ctx.Response.Headers["Deprecation"] = "true";
+    return Results.Ok(serviceV1.Find(id));
+});
 ```
 
-## Checklist CI/CD
-- [ ] Consumer-driven contract tests (Pact ou équivalent) → contrats passent avant le merge
-- [ ] `grep -r "@Deprecated" src/ | grep -v "// .*removed"` → chaque `@Deprecated` a une date de suppression
-- [ ] Nouveau endpoint → spec OpenAPI mise à jour + revue par un consommateur
-- [ ] `Sunset` header présent sur tout endpoint v1 déprécié
-- [ ] Aucun champ supprimé sans période de dépréciation de {{DEPRECATION_PERIOD}}
+## CI/CD checklist
+- [ ] Consumer-driven contract tests (Pact or equivalent) → contracts pass before merge
+- [ ] `rg "\[Obsolete\]" src/ | rg -v "// .*removed"` → every `[Obsolete]` has a removal date
+- [ ] New endpoint → OpenAPI spec updated + consumer review
+- [ ] `Sunset` header present on every deprecated v1 endpoint
+- [ ] No field removed without a {{DEPRECATION_PERIOD}} deprecation window

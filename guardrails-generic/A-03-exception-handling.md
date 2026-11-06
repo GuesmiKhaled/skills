@@ -1,86 +1,83 @@
 ---
 id: "A-03"
-titre: "Exception Handling — format structuré, zéro stack dans la réponse"
-severite: "🔴 BLOCAGE (stack trace dans la réponse / exception avalée)"
-applicable_si: [backend]
-declencheurs:
-  - "Tout endpoint pouvant retourner une erreur dans {{MODULE_CIBLE}}"
-  - "Toute exception métier ou technique non mappée vers un code HTTP cohérent"
-  - "Toute réponse d'erreur sans format standardisé"
+title: "Exception handling — structured format, zero stack in the response"
+severity: "🔴 BLOCKER (stack trace in response / swallowed exception)"
+applies_to: [backend]
+triggers:
+  - "Any endpoint that can return an error in {{MODULE_CIBLE}}"
+  - "Any business or technical exception not mapped to a consistent HTTP code"
+  - "Any error response without a standardized format"
 version: "1.0"
 ---
 
-## Risque
-Stack trace dans la réponse HTTP → fuite du nom des classes, packages, versions → surface d'attaque.
-Sans format standardisé → le front ne peut pas distinguer une 4xx (définitive) d'une 5xx (rejouable) → l'utilisateur reclique → double action.
+## Risk
+Stack trace in the HTTP response → leaks class names, namespaces, versions → attack surface.
+Without a standardized format → the frontend cannot distinguish a 4xx (definitive) from a 5xx (retryable) → the user double-clicks → duplicate action.
 
-## Règles
+## Rules
 
-- Tout endpoint → handler global d'exceptions qui intercepte **toutes** les exceptions.
-- Format obligatoire : `{{ERROR_FORMAT}}` (RFC 7807 ou équivalent) avec :
-  - `type` / `code` : identifiant du type d'erreur.
-  - `title` / `message` : message humain court.
-  - `status` : code HTTP.
-  - `detail` : explication sans information technique interne.
-- 4xx → erreur client définitive, non rejouable. Stack jamais dans la réponse.
-- 5xx → erreur technique potentiellement rejouable. Stack dans les **logs**, pas dans la réponse.
-- `catch (Exception e) {}` vide → BLOCAGE absolu.
+- Every endpoint → global exception handling that intercepts **all** exceptions.
+- Mandatory format: `{{ERROR_FORMAT}}` (RFC 9457 ProblemDetails) with:
+  - `type` / `code`: error type identifier.
+  - `title` / `message`: short human-readable message.
+  - `status`: HTTP code.
+  - `detail`: explanation without internal technical information.
+- 4xx → definitive client error, not retryable. Never a stack in the response.
+- 5xx → potentially retryable technical error. Stack in the **logs**, never in the response.
+- Empty `catch (Exception) { }` → absolute BLOCKER.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — stack trace dans la réponse (comportement Spring Boot par défaut non configuré)
-@GetMapping("/{{ENDPOINT}}/{id}")
-{{ENTITY}} get(@PathVariable {{ID_TYPE}} id) throws Exception {
-    return service.find(id); // stack exposée si exception
+```csharp
+// ❌ BLOCKER — stack trace in the response (Developer Exception Page left enabled outside Development)
+app.MapGet("/{{ENDPOINT}}/{id}", async (int id, Service service) =>
+    Results.Ok(await service.Find(id))); // unhandled exception → stack exposed
+
+// ❌ BLOCKER — swallowed exception
+try
+{
+    await _externalService.ProcessAsync(id);
 }
-
-// ❌ BLOCAGE — exception avalée
-try {
-    {{EXTERNAL_SERVICE}}.process(id);
-} catch (Exception e) {
-    // rien — état incohérent silencieux
-}
-```
-
-## Pattern conforme
-```java
-// ✅ Handler global — {{ERROR_FORMAT}}
-@RestControllerAdvice
-public class GlobalExceptionHandler {
-
-    @ExceptionHandler({{ENTITY}}NotFoundException.class)
-    {{ERROR_RESPONSE_TYPE}} handleNotFound({{ENTITY}}NotFoundException ex) {
-        {{ERROR_RESPONSE_TYPE}} err = {{ERROR_RESPONSE_TYPE}}.forStatus(404);
-        err.setType("{{ERROR_TYPE_BASE_URL}}/not-found");
-        err.setTitle("{{ENTITY}} Not Found");
-        err.setDetail("No {{ENTITY}} found with id: " + ex.getId()); // pas de stack
-        err.setProperty("errorCode", "{{ENTITY_UPPER}}_NOT_FOUND");
-        return err;
-    }
-
-    @ExceptionHandler({{BUSINESS_RULE_EXCEPTION}}.class)
-    {{ERROR_RESPONSE_TYPE}} handleBusinessRule({{BUSINESS_RULE_EXCEPTION}} ex) {
-        {{ERROR_RESPONSE_TYPE}} err = {{ERROR_RESPONSE_TYPE}}.forStatus(422);
-        err.setTitle("Business Rule Violated");
-        err.setDetail(ex.getPublicMessage()); // jamais ex.getMessage() brut
-        err.setProperty("errorCode", ex.getErrorCode());
-        return err; // 4xx → non rejouable
-    }
-
-    @ExceptionHandler({{TECHNICAL_EXCEPTION}}.class)
-    {{ERROR_RESPONSE_TYPE}} handleTechnical({{TECHNICAL_EXCEPTION}} ex, HttpServletRequest req) {
-        log.error("Technical error on {}", req.getRequestURI(), ex); // stack en LOG uniquement
-        {{ERROR_RESPONSE_TYPE}} err = {{ERROR_RESPONSE_TYPE}}.forStatus(503);
-        err.setTitle("Service Temporarily Unavailable");
-        err.setDetail("Please retry in a few seconds."); // pas de stack
-        err.setProperty("errorCode", "SERVICE_UNAVAILABLE");
-        return err; // 5xx → rejouable
-    }
+catch (Exception)
+{
+    // nothing — silent inconsistent state
 }
 ```
 
-## Checklist CI/CD
-- [ ] `curl /{{ENDPOINT}}/nonexistent` → réponse JSON structurée (type, title, status, errorCode) — 0 stack
-- [ ] `grep -r "catch.*Exception.*{$" src/ | grep -v "//"` → 0 catch vide
-- [ ] Test : 500 → log contient la stack ; réponse HTTP ne contient pas `stackTrace`
-- [ ] Test : 4xx → retryable=false ; 5xx → retryable=true (côté client front)
+## Compliant pattern
+```csharp
+// ✅ Program.cs — RFC 9457 ProblemDetails with custom error fields
+builder.Services.AddProblemDetails(o => o.CustomizeProblemDetails = ctx =>
+{
+    if (ctx.Exception is {{Entity}}NotFoundException notFound)
+    {
+        var problem = ctx.ProblemDetails;
+        problem.Status = StatusCodes.Status404NotFound;
+        problem.Title = "{{Entity}} Not Found";
+        problem.Detail = $"No {{entity}} found with id: {notFound.Id}"; // no stack
+        problem.Extensions["errorCode"] = "{{ENTITY_UPPER}}_NOT_FOUND";
+    }
+    else if (ctx.Exception is {{BusinessRuleException}} rule)
+    {
+        var problem = ctx.ProblemDetails;
+        problem.Status = StatusCodes.Status422UnprocessableEntity;
+        problem.Title = "Business Rule Violated";
+        problem.Detail = rule.PublicMessage; // never the raw ex.Message
+        problem.Extensions["errorCode"] = rule.ErrorCode; // 4xx → not retryable
+    }
+    else if (ctx.Exception is {{TechnicalException}} tech)
+    {
+        _logger.LogError("Technical error on {Path}", ctx.HttpContext.Request.Path, tech); // stack in LOG only
+        var problem = ctx.ProblemDetails;
+        problem.Status = StatusCodes.Status503ServiceUnavailable;
+        problem.Title = "Service Temporarily Unavailable";
+        problem.Detail = "Please retry in a few seconds."; // no stack
+        problem.Extensions["errorCode"] = "SERVICE_UNAVAILABLE"; // 5xx → retryable
+    }
+});
+```
+
+## CI/CD checklist
+- [ ] `curl /{{ENDPOINT}}/nonexistent` → structured JSON response (type, title, status, errorCode) — 0 stack
+- [ ] `rg "catch\s*\([^)]*Exception[^)]*\)\s*\{\s*\}" src/` → 0 empty catches
+- [ ] Test: 500 → log contains the stack; HTTP response does not contain `stackTrace`
+- [ ] Test: 4xx → retryable=false; 5xx → retryable=true (frontend client side)

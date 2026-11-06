@@ -1,83 +1,83 @@
 ---
 id: "F-03"
-titre: "Mobile — Secure Storage & Sync offline idempotente"
-severite: "🔴 BLOCAGE (donnée sensible en stockage non chiffré / sync sans idempotence)"
-applicable_si: [mobile]
-declencheurs:
-  - "Toute donnée sensible stockée côté client dans {{MODULE_CIBLE}} : {{SENSITIVE_DATA_TYPES}}"
-  - "Toute action à effet initiée hors-ligne"
-  - "Toute sync de données vers le serveur"
+title: "Mobile — secure storage & idempotent offline sync"
+severity: "🔴 BLOCKER (sensitive data in unencrypted storage / sync without idempotency)"
+applies_to: [mobile]
+triggers:
+  - "Any sensitive data stored client-side in {{MODULE_CIBLE}}: {{SENSITIVE_DATA_TYPES}}"
+  - "Any side-effect action initiated offline"
+  - "Any data sync toward the server"
 version: "1.0"
 ---
 
-## Risque
-`{{SENSITIVE_DATA_TYPES}}` dans `{{INSECURE_STORAGE}}` (non chiffré) = lisible sur device rooté → hijack de session.
-Sync à effet sans `{{IDEMPOTENCY_HEADER}}` + réseau instable → double delivery → double effet.
+## Risk
+`{{SENSITIVE_DATA_TYPES}}` in `{{INSECURE_STORAGE}}` (unencrypted) = readable on a rooted device → session hijack.
+Side-effect sync without `{{IDEMPOTENCY_HEADER}}` + unstable network → double delivery → double effect.
 
-## Règles
+## Rules
 
-**Stockage sécurisé :**
-- Données sensibles → `{{SECURE_STORAGE_LIB}}` (Keychain iOS / Android Keystore) uniquement.
-- Jamais : `{{INSECURE_STORAGE}}`, stockage local non chiffré pour des données sensibles.
-- Base locale pour l'outbox → SQLite chiffré (`{{ENCRYPTED_DB_LIB}}`).
+**Secure storage:**
+- Sensitive data → `{{SECURE_STORAGE_LIB}}` (iOS Keychain / Android Keystore) only.
+- Never: `{{INSECURE_STORAGE}}`, unencrypted local storage for sensitive data.
+- Local database for the outbox → encrypted SQLite (`{{ENCRYPTED_DB_LIB}}`).
 
-**Sync offline & idempotence :**
-- Action à effet hors-ligne → **outbox persistée chiffrée** avec `{{IDEMPOTENCY_HEADER}}` généré à la consignation.
-- État affiché : « en attente » — le succès n'est affiché qu'après **confirmation serveur**.
-- Sync → même `{{IDEMPOTENCY_HEADER}}`, backoff + jitter + limite, serveur source de vérité.
-- Conflit → le serveur gagne, le client re-synchronise et alerte l'utilisateur.
+**Offline sync & idempotency:**
+- Offline side-effect action → **persisted encrypted outbox** with `{{IDEMPOTENCY_HEADER}}` generated at enqueue time.
+- Displayed state: "pending" — success is displayed only after **server confirmation**.
+- Sync → same `{{IDEMPOTENCY_HEADER}}`, backoff + jitter + limit, server is the source of truth.
+- Conflict → the server wins, the client re-syncs and alerts the user.
 
 ## Anti-pattern
 ```dart
-// ❌ BLOCAGE — donnée sensible dans stockage non chiffré
+// ❌ BLOCKER — sensitive data in unencrypted storage
 final prefs = await {{INSECURE_STORAGE}}.getInstance();
 await prefs.setString('{{SENSITIVE_KEY}}', sensitiveValue);
 
-// ❌ BLOCAGE — sync sans idempotence
+// ❌ BLOCKER — sync without idempotency
 Future<void> syncPending() async {
   for (final op in pending) {
-    await api.post('/{{ENDPOINT}}', op.toJson()); // chaque rejeu = effet potentiel
+    await api.post('/{{ENDPOINT}}', op.toJson()); // every replay = potential double effect
   }
 }
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```dart
-// ✅ Stockage sécurisé
+// ✅ Secure storage
 final storage = const {{SECURE_STORAGE_LIB}}();
 await storage.write(key: '{{SENSITIVE_KEY}}', value: sensitiveValue);
-// → Keychain iOS / Android Keystore AES-256
+// → iOS Keychain / Android Keystore AES-256
 
-// ✅ Outbox persistée avec {{IDEMPOTENCY_HEADER}}
+// ✅ Persisted outbox with {{IDEMPOTENCY_HEADER}}
 Future<void> enqueue({{COMMAND}} cmd) async {
     final entry = OutboxEntry(
-        id: Uuid().v4(),          // {{IDEMPOTENCY_HEADER}} généré à la consignation
+        id: Uuid().v4(),          // {{IDEMPOTENCY_HEADER}} generated at enqueue time
         payload: cmd.toJson(),
         status: OutboxStatus.queued,
     );
-    await outboxDb.insert(entry); // BDD chiffrée
-    uiState = '{{PENDING_MESSAGE}}'; // jamais "succès" avant confirmation
+    await outboxDb.insert(entry); // encrypted DB
+    uiState = '{{PENDING_MESSAGE}}'; // never "success" before confirmation
 }
 
-// ✅ Sync idempotente — même clé, backoff, serveur source de vérité
+// ✅ Idempotent sync — same key, backoff, server is the source of truth
 Future<void> syncOutbox() async {
     final pending = await outboxDb.fetchQueued();
     for (final entry in pending) {
         try {
             final resp = await apiWithBackoff.post('/{{ENDPOINT}}',
-                headers: {'{{IDEMPOTENCY_HEADER}}': entry.id}, // même clé
+                headers: {'{{IDEMPOTENCY_HEADER}}': entry.id}, // same key
                 body: entry.payload,
             );
             if (resp.isSuccess || resp.statusCode == 409) {
                 await outboxDb.markSent(entry.id);
             }
-        } catch (e) { /* retry géré par backoff */ }
+        } catch (e) { /* retry handled by backoff */ }
     }
 }
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "{{INSECURE_STORAGE}}" lib/ | grep -i "{{SENSITIVE_GREP_PATTERN}}"` → 0
-- [ ] Test : action hors-ligne → kill app → relance → 1 seul envoi (même `{{IDEMPOTENCY_HEADER}}`)
-- [ ] Test : coupure réseau pendant sync → rejeu → 1 effet idempotent
-- [ ] Test : conflit de données → serveur gagne, UI re-synchronise et alerte
+## CI/CD checklist
+- [ ] `rg "{{INSECURE_STORAGE}}" lib/ | rg -i "{{SENSITIVE_GREP_PATTERN}}"` → 0
+- [ ] Test: offline action → kill app → restart → 1 send only (same `{{IDEMPOTENCY_HEADER}}`)
+- [ ] Test: network cut during sync → replay → 1 idempotent effect
+- [ ] Test: data conflict → server wins, UI re-syncs and alerts

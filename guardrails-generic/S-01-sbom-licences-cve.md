@@ -1,48 +1,50 @@
 ---
 id: "S-01"
-titre: "SBOM, licences & CVE scan"
-severite: "🔴 BLOCAGE (copyleft fort / CVE ≥ 9.0) — 🟡 ALERTE (inconnue / CVE 7-8.9)"
-applicable_si: [backend, frontend, mobile]
-declencheurs:
-  - "Ajout/mise à jour de dépendance : {{PACKAGE_MANAGER_FILE}} (pom.xml, package.json, go.mod, Cargo.toml)"
-  - "Rapport Trivy/Grype/Dependabot signalant une CVE sur une dépendance de {{MODULE_CIBLE}}"
+title: "SBOM, licenses & CVE scan"
+severity: "🔴 BLOCKER (strong copyleft / CVE ≥ 9.0) — 🟡 WARNING (unknown / CVE 7-8.9)"
+applies_to: [backend, frontend, mobile]
+triggers:
+  - "Dependency add/update: {{PACKAGE_MANAGER_FILE}} (*.csproj, Directory.Packages.props, package.json, go.mod)"
+  - "Trivy/Grype/Dependabot/`dotnet audit` report flagging a CVE on a dependency of {{MODULE_CIBLE}}"
 version: "1.0"
 ---
 
-## Risque
-Une dépendance AGPL/GPL contaminante oblige à ouvrir tout le code propriétaire de {{MODULE_CIBLE}} sous la même licence.
-Une dépendance avec CVE CVSS ≥ 9.0 est exploitable dès le merge — aucun contrôle applicatif ne protège contre une RCE côté librairie.
+## Risk
+A contaminating AGPL/GPL dependency forces opening all of {{MODULE_CIBLE}}'s proprietary code under the same license.
+A dependency with a CVE CVSS ≥ 9.0 is exploitable as soon as merged — no application-level control protects against an RCE in the library.
 
-## Règles
+## Rules
 
-- **Licences bloquées** : AGPL, GPL, LGPL sans exception écrite, propriétaire fermée, SSPL.
-- **Licences autorisées** : MIT, Apache 2.0, BSD, ISC, MPL 2.0 (isolation module).
-- **CVE CVSS ≥ 9.0** → BLOCAGE : patcher ou remplacer avant merge.
-- **CVE CVSS 7.0–8.9** → ALERTE : patch dans la sprint courante, justification TL requise.
-- **CVE < 7.0** → trace, suivi en backlog.
-- Jamais de version `LATEST` ou `*` sur une dépendance critique de {{MODULE_CIBLE}}.
+- **Blocked licenses**: AGPL, GPL, LGPL without a written exception, closed proprietary, SSPL.
+- **Allowed licenses**: MIT, Apache 2.0, BSD, ISC, MPL 2.0 (module isolation).
+- **CVE CVSS ≥ 9.0** → BLOCKER: patch or replace before merge.
+- **CVE CVSS 7.0–8.9** → WARNING: patch in the current sprint, TL justification required.
+- **CVE < 7.0** → track, follow up in the backlog.
+- Never a `LATEST` or `*` version on a critical dependency of {{MODULE_CIBLE}} (centralized versioning in `Directory.Packages.props`).
 
 ## Anti-pattern
-```
-# ❌ BLOCAGE — licence GPL contaminante dans {{MODULE_CIBLE}}
-dependance: some-gpl-lib:2.1  # licence GPL non compatible avec licence propriétaire
+```xml
+<!-- ❌ BLOCKER — contaminating GPL license in {{MODULE_CIBLE}} -->
+<PackageReference Include="some-gpl-lib" Version="2.1" /> <!-- GPL license incompatible with the proprietary license -->
 
-# ❌ BLOCAGE — CVE CVSS 9.8 connue
-dependance: log4j-core:2.14.1  # CVE-2021-44228 (Log4Shell)
+<!-- ❌ BLOCKER — known CVE CVSS 9.8 -->
+<PackageReference Include="log4j-core" Version="2.14.1" /> <!-- CVE-2021-44228 (Log4Shell) -->
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```bash
-# ✅ Vérification CI obligatoire sur {{MODULE_CIBLE}}
+# ✅ Mandatory CI checks on {{MODULE_CIBLE}}
+dotnet list package --vulnerable --include-transitive
+dotnet audit --fail-on critical
 trivy fs --severity HIGH,CRITICAL --exit-code 1 .
 grype . --fail-on high
 
-# ✅ Rapport de licences
+# ✅ License report
 license-checker --failOn "GPL;AGPL;LGPL"
 ```
 
-## Checklist CI/CD
-- [ ] `trivy fs --severity CRITICAL --exit-code 1` → 0 résultats en CI sur {{MODULE_CIBLE}}
-- [ ] Toute nouvelle dépendance auditée : licence dans la liste autorisée
-- [ ] CVE CVSS ≥ 9.0 → PR bloquée jusqu'au patch
-- [ ] Dépendances publiées il y a ≥ 7 jours (protection supply chain)
+## CI/CD checklist
+- [ ] `dotnet audit` + `trivy fs --severity CRITICAL --exit-code 1` → 0 results in CI on {{MODULE_CIBLE}}
+- [ ] Every new dependency audited: license on the allowed list
+- [ ] CVE CVSS ≥ 9.0 → PR blocked until patched
+- [ ] Dependencies published ≥ 7 days ago (supply-chain protection)

@@ -1,84 +1,99 @@
 ---
 id: "B-03"
-titre: "Résilience — Circuit Breaker + Retry + Fallback"
-severite: "🔴 BLOCAGE (appel externe sans timeout/CB) — 🟡 ALERTE (retry naïf)"
-applicable_si: [backend]
-declencheurs:
-  - "Tout appel synchrone à un service externe depuis {{MODULE_CIBLE}} : {{EXTERNAL_SERVICES}}"
-  - "Toute boucle de retry ou annotation de retry dans le code"
-  - "Toute opération à effet réessayée sans clé d'idempotence"
+title: "Resilience — Circuit Breaker + Retry + Fallback"
+severity: "🔴 BLOCKER (external call without timeout/CB) — 🟡 WARNING (naive retry)"
+applies_to: [backend]
+triggers:
+  - "Any synchronous call to an external service from {{MODULE_CIBLE}}: {{EXTERNAL_SERVICES}}"
+  - "Any retry loop or retry policy in the code"
+  - "Any side-effect operation retried without an idempotency key"
 version: "1.0"
 ---
 
-## Risque
-Sans timeout : un service externe lent = threads bloqués → pool épuisé → OOM → cascade sur tous les endpoints de {{MODULE_CIBLE}}.
-Sans jitter : N instances qui re-tentent en même temps = retry storm → panne prolongée.
-Retry à effet sans même `{{IDEMPOTENCY_HEADER}}` = double effet garanti.
+## Risk
+Without a timeout: a slow external service = blocked threads → pool exhausted → OOM → cascade on every endpoint of {{MODULE_CIBLE}}.
+Without jitter: N instances retrying at the same time = retry storm → prolonged outage.
+Side-effect retry without even `{{IDEMPOTENCY_HEADER}}` = guaranteed double effect.
 
-## Règles
+## Rules
 
-**Circuit Breaker ({{RESILIENCE_LIB}}) — par dépendance :**
-- Timeout explicite : connect ≤ {{CONNECT_TIMEOUT}}, read ≤ budget SLO restant.
-- Fenêtre glissante {{CB_WINDOW}} appels, seuil {{CB_THRESHOLD}} %, délai fermeture {{CB_DELAY}}, half-open {{CB_HALF_OPEN}} tentatives.
-- Fallback à effet → persister état intermédiaire + événement de réconciliation — jamais échec silencieux.
-- Fallback non-critique → valeur dégradée (cache/vide) + log d'alerte.
+**Circuit Breaker ({{RESILIENCE_LIB}} — Polly / `AddStandardResilienceHandler`) — per dependency:**
+- Explicit timeout: connect ≤ {{CONNECT_TIMEOUT}}, read ≤ remaining SLO budget.
+- Sliding window of {{CB_WINDOW}} calls, {{CB_THRESHOLD}}% threshold, open delay {{CB_DELAY}}, half-open {{CB_HALF_OPEN}} attempts.
+- Side-effect fallback → persist intermediate state + reconciliation event — never silent failure.
+- Non-critical fallback → degraded value (cache/empty) + warning log.
 
-**Retry — politique unique :**
-- Base {{RETRY_BASE}}, facteur {{RETRY_FACTOR}}, **jitter plein**, `maxAttempts = {{RETRY_MAX}}`, cap {{RETRY_CAP}}.
-- Retry à effet → **même** clé d'idempotence originale — jamais nouvelle clé (fiche B-02).
-- Pas de retry si le circuit breaker est ouvert.
+**Retry — single policy:**
+- Base {{RETRY_BASE}}, factor {{RETRY_FACTOR}}, **full jitter**, `MaxRetryAttempts = {{RETRY_MAX}}`, cap {{RETRY_CAP}}.
+- Side-effect retry → **same** original idempotency key — never a new key (card B-02).
+- No retry if the circuit breaker is open.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — appel externe sans timeout ni CB
-{{SERVICE_RESPONSE}} result = {{EXTERNAL_CLIENT}}.call(request); // peut attendre ∞
+```csharp
+// ❌ BLOCKER — external call without timeout nor CB
+var result = await _externalClient.CallAsync(request); // can wait ∞
 
-// ❌ BLOCAGE — retry naïf
-for (int i = 0; i < 10; i++) {
-    Thread.sleep(1000); // fixe → storm ; pas d'idempotence → double effet
-    {{EXTERNAL_CLIENT}}.call(request);
+// ❌ BLOCKER — naive retry
+for (var i = 0; i < 10; i++)
+{
+    await Task.Delay(1000); // fixed → storm; no idempotency → double effect
+    await _externalClient.CallAsync(request);
 }
 ```
 
-## Pattern conforme
-```java
-// ✅ Resilience4j : CB + timeout + retry
-@CircuitBreaker(name = "{{CB_NAME}}", fallbackMethod = "handleFallback")
-@Retry(name = "{{RETRY_NAME}}")
-@TimeLimiter(name = "{{TIMEOUT_NAME}}")
-public CompletableFuture<{{SERVICE_RESPONSE}}> call({{REQUEST}} req) {
-    return CompletableFuture.supplyAsync(() -> {{EXTERNAL_CLIENT}}.execute(req));
-}
+## Compliant pattern
+```csharp
+// ✅ .NET 10: built-in standard resilience handler (Polly under the hood)
+builder.Services.AddHttpClient<{{ExternalClient}}>(client =>
+        client.Timeout = TimeSpan.FromMilliseconds({{READ_TIMEOUT}}))
+    .AddStandardResilienceHandler(); // CB + retry (exponential, jitter) + timeout
 
-// ✅ Fallback — état intermédiaire + réconciliation
-CompletableFuture<{{SERVICE_RESPONSE}}> handleFallback({{REQUEST}} req, Exception ex) {
-    repository.updateStatus(req.id(), PENDING);
-    eventPublisher.publish(new {{RETRY_EVENT}}(req.id(), req.idempotencyKey()));
-    return CompletableFuture.completedFuture({{SERVICE_RESPONSE}}.pending(req.id()));
+// ✅ Explicit Polly v8 pipeline — CB + retry + jitter
+var pipeline = new ResiliencePipelineBuilder<{{ServiceResponse}}>()
+    .AddTimeout(TimeSpan.FromMilliseconds({{READ_TIMEOUT}}))
+    .AddRetry(new RetryOptions
+    {
+        MaxRetryAttempts = {{RETRY_MAX}},
+        Delay = TimeSpan.FromMilliseconds({{RETRY_BASE}}),
+        BackoffDelayType = DelayBackoffType.Exponential,
+        MaxDelay = TimeSpan.FromMilliseconds({{RETRY_CAP}}),
+        UseJitter = true
+    })
+    .AddCircuitBreaker(new CircuitBreakerOptions
+    {
+        SamplingDuration = TimeSpan.FromSeconds({{CB_WINDOW}}),
+        MinimumThroughput = 20,
+        FailureRate = {{CB_THRESHOLD}} / 100m,
+        BreakDuration = TimeSpan.FromSeconds({{CB_DELAY}})
+    })
+    .Build();
+
+// ✅ Fallback — intermediate state + reconciliation
+try
+{
+    return await pipeline.ExecuteAsync(ct => _externalClient.ExecuteAsync(req, ct));
+}
+catch (Exception) when (CircuitIsOpen || MaxAttemptsReached)
+{
+    await _repository.UpdateStatusAsync(req.Id, OrderStatus.Pending, ct);
+    await _eventPublisher.PublishAsync(new {{RetryEvent}}(req.Id, req.IdempotencyKey), ct);
+    return {{ServiceResponse}}.Pending(req.Id); // never silent failure
 }
 ```
 
-```yaml
-resilience4j:
-  circuitbreaker.instances.{{CB_NAME}}:
-    slidingWindowSize: {{CB_WINDOW}}
-    failureRateThreshold: {{CB_THRESHOLD}}
-    waitDurationInOpenState: {{CB_DELAY}}
-    permittedNumberOfCallsInHalfOpenState: {{CB_HALF_OPEN}}
-  retry.instances.{{RETRY_NAME}}:
-    maxAttempts: {{RETRY_MAX}}
-    waitDuration: {{RETRY_BASE}}
-    enableExponentialBackoff: true
-    exponentialBackoffMultiplier: {{RETRY_FACTOR}}
-    enableRandomizedWait: true
-    randomizedWaitFactor: 1.0
-  timelimiter.instances.{{TIMEOUT_NAME}}:
-    timeoutDuration: {{READ_TIMEOUT}}
+```csharp
+// ✅ appsettings.json — options bound from configuration
+{
+  "{{ExternalClient}}": {
+    "TimeoutMilliseconds": {{READ_TIMEOUT}},
+    "CircuitBreaker": { "SamplingDurationSeconds": {{CB_WINDOW}}, "FailureRate": {{CB_THRESHOLD}} }
+  }
+}
 ```
 
-## Checklist CI/CD
-- [ ] Tout appel `{{EXTERNAL_SERVICES}}` annoté `@CircuitBreaker` + `@TimeLimiter`
-- [ ] Test : coupure {{EXTERNAL_SERVICE}} {{CB_DELAY}} → CB ouvert < 1 s, 0 thread bloqué > timeout, état PENDING persisté
-- [ ] Test : retry {{RETRY_MAX}}× échec → exactement {{RETRY_MAX}} tentatives, puis état intermédiaire
-- [ ] Test : reprise post-panne → tentatives décorrélées (jitter), pas de pic synchronisé
-- [ ] Test : double appel (même clé) → 1 seul effet
+## CI/CD checklist
+- [ ] Every `{{EXTERNAL_SERVICES}}` call wrapped in a resilience pipeline (CB + timeout)
+- [ ] Test: cut {{EXTERNAL_SERVICE}} for {{CB_DELAY}} → CB opens < 1 s, 0 thread blocked > timeout, PENDING state persisted
+- [ ] Test: {{RETRY_MAX}}× retry failure → exactly {{RETRY_MAX}} attempts, then intermediate state
+- [ ] Test: post-failure recovery → uncorrelated attempts (jitter), no synchronized spike
+- [ ] Test: double call (same key) → 1 effect

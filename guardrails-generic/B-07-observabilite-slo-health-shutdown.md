@@ -1,53 +1,53 @@
 ---
 id: "B-07"
-titre: "Observabilité — Métriques, SLO, Health Checks & Graceful Shutdown"
-severite: "🔴 BLOCAGE (service sans health / arrêt sans drain) — 🟡 ALERTE"
-applicable_si: [backend]
-declencheurs:
-  - "Tout nouveau service sans health check et métriques dans {{MODULE_CIBLE}}"
-  - "Tout manifest K8s sans livenessProbe/readinessProbe"
-  - "Tout service sans SLO défini"
-  - "Tout déploiement/arrêt sans drain explicite"
+title: "Observability — metrics, SLO, health checks & graceful shutdown"
+severity: "🔴 BLOCKER (service without health / stop without drain) — 🟡 WARNING"
+applies_to: [backend]
+triggers:
+  - "Any new service without health checks and metrics in {{MODULE_CIBLE}}"
+  - "Any K8s manifest without livenessProbe/readinessProbe"
+  - "Any service without a defined SLO"
+  - "Any deployment/stop without an explicit drain"
 version: "1.0"
 ---
 
-## Risque
-Un service sans `readinessProbe` → trafic envoyé à un pod non prêt → erreurs 5xx en prod.
-Un arrêt sans drain → une opération in-flight est abandonnée → état incohérent sans trace → incident.
-Sans SLO → on ne sait pas quand le service commence à dégrader silencieusement.
+## Risk
+A service without `readinessProbe` → traffic sent to a not-ready pod → 5xx errors in production.
+A stop without drain → an in-flight operation is abandoned → inconsistent state without a trace → incident.
+Without an SLO → you don't know when the service starts degrading silently.
 
-## Règles
+## Rules
 
-**Health Checks & Métriques :**
-- Tout service → `{{HEALTH_ENDPOINT}}` (liveness + readiness) + `{{METRICS_ENDPOINT}}` (Prometheus).
-- K8s manifest : `livenessProbe` + `readinessProbe` configurées.
-- Métriques minimales : `{{OPERATION_TYPE}}.success.rate`, `{{OPERATION_TYPE}}.latency.p99`, taux de rejets.
+**Health checks & metrics:**
+- Every service → `{{HEALTH_ENDPOINT}}` (liveness + readiness) + `{{METRICS_ENDPOINT}}` (Prometheus).
+- K8s manifest: `livenessProbe` + `readinessProbe` configured.
+- Minimal metrics: `{{OPERATION_TYPE}}.success.rate`, `{{OPERATION_TYPE}}.latency.p99`, rejection rate.
 
-**SLO à définir :**
-- Taux de succès {{OPERATION_TYPE}} ≥ {{SUCCESS_RATE_TARGET}} % → alerte si inférieur.
-- Latence P99 ≤ {{P99_TARGET}} ms → alerte si dépassé.
-- Opérations en état intermédiaire > {{INTERMEDIATE_COUNT}} depuis > {{INTERMEDIATE_TIMEOUT}} → alerte.
+**SLOs to define:**
+- {{OPERATION_TYPE}} success rate ≥ {{SUCCESS_RATE_TARGET}}% → alert if below.
+- P99 latency ≤ {{P99_TARGET}} ms → alert if exceeded.
+- Operations in intermediate state > {{INTERMEDIATE_COUNT}} for > {{INTERMEDIATE_TIMEOUT}} → alert.
 
-**Graceful Shutdown (séquence obligatoire) :**
-1. `readiness` → `false` (LB n'envoie plus de trafic).
-2. Drain in-flight (borné, ex. {{DRAIN_TIMEOUT}}).
-3. Flush : commit des offsets/messages **après** l'effet.
-4. Arrêt propre.
-- K8s : `lifecycle.preStop` + `terminationGracePeriodSeconds` ≥ drain + flush.
-- Tout in-flight non garanti → état intermédiaire + réconciliation (jamais abandonné).
+**Graceful shutdown (mandatory sequence):**
+1. `readiness` → `false` (LB sends no more traffic).
+2. Drain in-flight (bounded, e.g. {{DRAIN_TIMEOUT}}).
+3. Flush: commit offsets/messages **after** the effect.
+4. Clean stop.
+- K8s: `lifecycle.preStop` + `terminationGracePeriodSeconds` ≥ drain + flush.
+- Any in-flight not guaranteed → intermediate state + reconciliation (never abandoned).
 
 ## Anti-pattern
 ```yaml
-# ❌ BLOCAGE — pas de readinessProbe
+# ❌ BLOCKER — no readinessProbe
 containers:
   - name: {{MODULE_CIBLE}}
     image: {{MODULE_CIBLE}}:latest
-    # Aucun probe → trafic envoyé même si le service n'est pas prêt
+    # No probes → traffic sent even if the service is not ready
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```yaml
-# ✅ Probes K8s + graceful shutdown
+# ✅ K8s probes + graceful shutdown
 containers:
   - name: {{MODULE_CIBLE}}
     livenessProbe:
@@ -66,15 +66,20 @@ spec:
   terminationGracePeriodSeconds: {{TERMINATION_GRACE_PERIOD}}
 ```
 
-```yaml
-# ✅ Graceful shutdown applicatif (Spring Boot)
-server.shutdown: graceful
-spring.lifecycle.timeout-per-shutdown-phase: {{DRAIN_TIMEOUT}}
+```csharp
+// ✅ Graceful shutdown — appsettings.json + Program.cs
+// appsettings.json: { "Host": { "ShutdownTimeout": "{{DRAIN_TIMEOUT}}" } }
+builder.Services.AddHealthChecks();
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => true });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = reg => reg.Tags.Contains("ready")
+});
 ```
 
-## Checklist CI/CD
-- [ ] `kubectl get deploy {{MODULE_CIBLE}} -o yaml | grep -A5 readinessProbe` → présente
-- [ ] `curl {{HEALTH_ENDPOINT}}` → `{"status":"UP"}` avec composants
-- [ ] Test : `kill -TERM` pendant une opération in-flight → 0 opération abandonnée, état cohérent
-- [ ] Alerte : `{{OPERATION_TYPE}}_success_rate < {{SUCCESS_RATE_TARGET}}` → notification équipe
-- [ ] Alerte : `{{OPERATION_TYPE}}_intermediate_count{age>{{INTERMEDIATE_TIMEOUT}}} > {{INTERMEDIATE_COUNT}}`
+## CI/CD checklist
+- [ ] `kubectl get deploy {{MODULE_CIBLE}} -o yaml | grep -A5 readinessProbe` → present
+- [ ] `curl {{HEALTH_ENDPOINT}}` → `{"status":"UP"}` with components
+- [ ] Test: `kill -TERM` during an in-flight operation → 0 operation abandoned, consistent state
+- [ ] Alert: `{{OPERATION_TYPE}}_success_rate < {{SUCCESS_RATE_TARGET}}` → team notification
+- [ ] Alert: `{{OPERATION_TYPE}}_intermediate_count{age>{{INTERMEDIATE_TIMEOUT}}} > {{INTERMEDIATE_COUNT}}`

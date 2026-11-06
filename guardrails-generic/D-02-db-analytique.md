@@ -1,76 +1,81 @@
 ---
 id: "D-02"
-titre: "{{ANALYTICS_DB}} — Requêtes analytiques & modélisation orientée colonnes"
-severite: "🟡 ALERTE (requête orientée ligne / scan sans filtre)"
-applicable_si: [backend]
-declencheurs:
-  - "Toute requête {{ANALYTICS_DB}} pour les rapports et analytics dans {{MODULE_CIBLE}}"
-  - "Tout INSERT vers {{ANALYTICS_DB}} depuis un flux temps réel"
-  - "Toute jointure ou UPDATE/DELETE sur {{ANALYTICS_DB}}"
+title: "{{ANALYTICS_DB}} — analytical queries & column-oriented modeling"
+severity: "🟡 WARNING (row-oriented query / unfiltered scan)"
+applies_to: [backend]
+triggers:
+  - "Any {{ANALYTICS_DB}} query for reports and analytics in {{MODULE_CIBLE}}"
+  - "Any INSERT into {{ANALYTICS_DB}} from a real-time flow"
+  - "Any join or UPDATE/DELETE on {{ANALYTICS_DB}}"
 version: "1.0"
 ---
 
-## Risque
-Une requête orientée ligne sur {{ANALYTICS_DB}} (UPDATE, DELETE, `SELECT *`) sur {{DATA_VOLUME}} → full scan, saturation I/O, impact sur les rapports critiques.
-INSERT ligne par ligne → fragmentation → dégradation progressive des lectures.
+## Risk
+A row-oriented query on {{ANALYTICS_DB}} (UPDATE, DELETE, `SELECT *`) on {{DATA_VOLUME}} → full scan, I/O saturation, impact on critical reports.
+Row-by-row INSERT → fragmentation → progressive read degradation.
 
-## Règles
+## Rules
 
-- {{ANALYTICS_DB}} = OLAP, lecture analytique — jamais de lecture transactionnelle (utiliser {{TRANSACTIONAL_DB}} pour ça).
-- `SELECT` → toujours colonnes explicites (jamais `SELECT *`), filtrer sur les colonnes d'index/partition.
-- `INSERT` → par batch (≥ `{{BATCH_SIZE}}` lignes ou ≥ `{{BATCH_INTERVAL}}`) — jamais ligne par ligne.
-- Pas de `UPDATE`/`DELETE` fréquents → concevoir en append-only + versioning/partitioning.
-- Partitioning : par `{{PARTITION_FIELD}}` (ex. mois, région) pour les grandes tables.
+- {{ANALYTICS_DB}} = OLAP, analytical reads — never transactional reads (use {{TRANSACTIONAL_DB}} for that).
+- `SELECT` → always explicit columns (never `SELECT *`), filter on the index/partition columns.
+- `INSERT` → batched (≥ `{{BATCH_SIZE}}` rows or ≥ `{{BATCH_INTERVAL}}`) — never row by row.
+- No frequent `UPDATE`/`DELETE` → design append-only + versioning/partitioning.
+- Partitioning: by `{{PARTITION_FIELD}}` (e.g. month, region) for large tables.
 
 ## Anti-pattern
 ```sql
--- ❌ ALERTE — SELECT * sur {{ANALYTICS_DB}}
+-- ❌ WARNING — SELECT * on {{ANALYTICS_DB}}
 SELECT * FROM {{ANALYTICS_TABLE}} WHERE {{FILTER_FIELD}} = '{{FILTER_VALUE}}';
 
--- ❌ ALERTE — INSERT ligne par ligne
+-- ❌ WARNING — row-by-row INSERT
 INSERT INTO {{ANALYTICS_TABLE}} VALUES (...); -- × {{INSERT_VOLUME}} = fragmentation
 
--- ❌ ALERTE — UPDATE fréquent (coûteux)
+-- ❌ WARNING — frequent UPDATE (expensive)
 UPDATE {{ANALYTICS_TABLE}} SET status = '{{NEW_STATUS}}' WHERE id = :id;
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```sql
--- ✅ SELECT colonnes utiles + filtre sur partition
+-- ✅ SELECT useful columns + partition filter
 SELECT
     {{GROUP_BY_FIELD}},
     SUM({{METRIC_FIELD}}) AS total,
     COUNT(*) AS count
 FROM {{ANALYTICS_TABLE}}
-WHERE {{PARTITION_FIELD}} = {{PARTITION_VALUE}}  -- filtre sur partition
+WHERE {{PARTITION_FIELD}} = {{PARTITION_VALUE}}  -- partition filter
   AND {{FILTER_FIELD}} = '{{FILTER_VALUE}}'
 GROUP BY {{GROUP_BY_FIELD}}
 ORDER BY {{GROUP_BY_FIELD}};
 ```
 
-```java
-// ✅ INSERT batch
-List<{{EVENT_TYPE}}> batch = new ArrayList<>();
-if (batch.size() >= {{BATCH_SIZE}} || elapsed > {{BATCH_INTERVAL_MS}}) {
-    analyticsClient.insertBatch("{{ANALYTICS_TABLE}}", batch);
-    batch.clear();
+```csharp
+// ✅ Batch INSERT
+var batch = new List<{{EventType}}>({{BATCH_SIZE}});
+void Enqueue({{EventType}} evt)
+{
+    batch.Add(evt);
+    if (batch.Count >= {{BATCH_SIZE}} || _stopwatch.Elapsed > {{BATCH_INTERVAL_MS}})
+    {
+        _analyticsClient.InsertBatch("{{ANALYTICS_TABLE}}", batch);
+        batch.Clear();
+    }
 }
 ```
 
 ```sql
--- ✅ Append-only + versioning au lieu d'UPDATE
+-- ✅ Append-only + versioning instead of UPDATE
 CREATE TABLE {{ANALYTICS_TABLE}} (
     id UUID,
     status VARCHAR,
-    version INT,    -- incrémenter à chaque changement
+    version INT,    -- incremented on every change
     {{TIMESTAMP_FIELD}} TIMESTAMP
-) ENGINE = {{ANALYTICS_ENGINE}}(version)   -- ex: ReplacingMergeTree, ou partition + MERGE
+) ENGINE = {{ANALYTICS_ENGINE}}(version)   -- e.g. ReplacingMergeTree, or partition + MERGE
 PARTITION BY {{PARTITION_EXPRESSION}}
 ORDER BY ({{SORT_FIELDS}});
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "SELECT \*" src/ | grep -i "{{ANALYTICS_DB_KEYWORD}}"` → 0
-- [ ] INSERT {{ANALYTICS_TABLE}} → vérifier batch size ≥ {{BATCH_SIZE}} lignes
-- [ ] Pas de `UPDATE`/`DELETE` dans les requêtes analytiques planifiées
-- [ ] Test : rapport sur {{DATA_VOLUME}} → < {{MAX_QUERY_TIME}} s (filtré sur partition)
+## CI/CD checklist
+- [ ] `rg "SELECT \\*" src/ | rg -i "{{ANALYTICS_DB_KEYWORD}}"` → 0
+- [ ] INSERTs on {{ANALYTICS_TABLE}} → verify batch size ≥ {{BATCH_SIZE}} rows
+- [ ] No `UPDATE`/`DELETE` in scheduled analytical queries
+- [ ] Test: report on {{DATA_VOLUME}} → < {{MAX_QUERY_TIME}} s (partition-filtered)

@@ -1,42 +1,42 @@
 ---
 id: "F-01"
-titre: "{{FRONTEND_FRAMEWORK}} — Composants modernes & gestion d'état réactive"
-severite: "🟡 ALERTE (patterns deprecated sur code nouveau)"
-applicable_si: [frontend]
-declencheurs:
-  - "Création d'un nouveau composant {{FRONTEND_FRAMEWORK}} dans {{MODULE_CIBLE}}"
-  - "Utilisation de patterns dépréciés ({{DEPRECATED_PATTERNS}}) sur code nouveau"
-  - "Gestion d'état par mutation directe au lieu de patterns réactifs"
+title: "{{FRONTEND_FRAMEWORK}} — modern components & reactive state management"
+severity: "🟡 WARNING (deprecated patterns on new code)"
+applies_to: [frontend]
+triggers:
+  - "Creation of a new {{FRONTEND_FRAMEWORK}} component in {{MODULE_CIBLE}}"
+  - "Use of deprecated patterns ({{DEPRECATED_PATTERNS}}) on new code"
+  - "State management by direct mutation instead of reactive patterns"
 version: "1.0"
 ---
 
-## Risque
-Composants avec des patterns dépréciés de {{FRONTEND_FRAMEWORK}} dans {{MODULE_CIBLE}} : dépendances qui s'accumulent, détection de changement lente → latence UI perceptible sur les écrans avec beaucoup de données.
+## Risk
+Components using deprecated {{FRONTEND_FRAMEWORK}} patterns in {{MODULE_CIBLE}}: accumulated dependencies, slow change detection → perceptible UI latency on data-heavy screens.
 
-## Règles
+## Rules
 
-- Tout nouveau composant → patterns recommandés par la version {{FRAMEWORK_VERSION}} de {{FRONTEND_FRAMEWORK}}.
-- Gestion d'état local → mécanisme réactif natif (`{{REACTIVE_STATE_MECHANISM}}`).
-- Templates → syntaxe moderne (`{{MODERN_TEMPLATE_SYNTAX}}`).
-- Composants sans état externe → stratégie de détection de changement optimisée (`{{CHANGE_DETECTION_STRATEGY}}`).
+- Every new component → patterns recommended by {{FRAMEWORK_VERSION}} of {{FRONTEND_FRAMEWORK}}.
+- Local state management → native reactive mechanism (`{{REACTIVE_STATE_MECHANISM}}`).
+- Templates → modern syntax (`{{MODERN_TEMPLATE_SYNTAX}}`).
+- Components without external state → optimized change-detection strategy (`{{CHANGE_DETECTION_STRATEGY}}`).
 
 ## Anti-pattern
 ```typescript
-// ❌ ALERTE — patterns deprecated sur code nouveau dans {{MODULE_CIBLE}}
+// ❌ WARNING — deprecated patterns on new code in {{MODULE_CIBLE}}
 // {{DEPRECATED_PATTERN_EXAMPLE}}
 
-// Gestion d'état par Subject/BehaviorSubject quand un Signal suffit
+// State management with Subject/BehaviorSubject when a Signal suffices
 import { BehaviorSubject } from 'rxjs';
 loading$ = new BehaviorSubject<boolean>(false);
 
-// Syntaxe deprecated
-// *ngIf="condition" au lieu de @if (condition)
-// *ngFor="let item of items" au lieu de @for (item of items; track item.id)
+// Deprecated syntax
+// *ngIf="condition" instead of @if (condition)
+// *ngFor="let item of items" instead of @for (item of items; track item.id)
 ```
 
-## Pattern conforme
+## Compliant pattern
 ```typescript
-// ✅ Composant avec patterns modernes {{FRONTEND_FRAMEWORK}} {{FRAMEWORK_VERSION}}
+// ✅ Component with modern {{FRONTEND_FRAMEWORK}} {{FRAMEWORK_VERSION}} patterns
 @Component({
   selector: 'app-{{COMPONENT_NAME}}',
   standalone: true,
@@ -61,7 +61,7 @@ export class {{COMPONENT_CLASS_NAME}} {
 }
 ```
 
-## Checklist CI/CD
-- [ ] `grep -r "{{DEPRECATED_PATTERN_GREP}}" src/{{FRONTEND_SRC_PATH}}/` → 0 sur nouveaux composants
-- [ ] Tout nouveau composant a `standalone: true` et `{{CHANGE_DETECTION_STRATEGY}}`
-- [ ] Lint règle : pas de patterns deprecated dans les nouveaux fichiers (ESLint rule)
+## CI/CD checklist
+- [ ] `rg "{{DEPRECATED_PATTERN_GREP}}" src/{{FRONTEND_SRC_PATH}}/` → 0 on new components
+- [ ] Every new component has `standalone: true` and `{{CHANGE_DETECTION_STRATEGY}}`
+- [ ] Lint rule: no deprecated patterns in new files (ESLint rule)

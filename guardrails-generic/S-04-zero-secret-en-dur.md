@@ -1,50 +1,55 @@
 ---
 id: "S-04"
-titre: "Zéro secret en dur — code, config, Dockerfile, CI"
-severite: "🔴 BLOCAGE"
-applicable_si: [backend, frontend, mobile]
-declencheurs:
-  - "Littéral type password/secret/private-key/DSN/API-key dans le code, YAML, config, Dockerfile, CI"
-  - "Connexion à {{DATA_STORE}} (BDD, cache, queue) avec identifiants en clair"
-  - "Clé API, token OAuth, clé de chiffrement en dur dans {{MODULE_CIBLE}}"
+title: "Zero hardcoded secrets — code, configuration, Dockerfile, CI"
+severity: "🔴 BLOCKER"
+applies_to: [backend, frontend, mobile]
+triggers:
+  - "Literal password/secret/private-key/DSN/API-key in code, JSON/YAML config, Dockerfile, CI"
+  - "Connection to {{DATA_STORE}} (DB, cache, queue) with clear-text credentials"
+  - "API key, OAuth token or encryption key hardcoded in {{MODULE_CIBLE}}"
 version: "1.0"
 ---
 
-## Risque
-Un secret commité dans git = exposé pour toujours (historique git non effaçable).
-Un DSN en clair exposé via un endpoint de diagnostics = accès à {{DATA_STORE}} en production.
+## Risk
+A secret committed to git = exposed forever (git history cannot be wiped).
+A clear-text DSN exposed via a diagnostics endpoint = access to {{DATA_STORE}} in production.
 
-## Règles
+## Rules
 
-- Tout secret → variable d'environnement ou gestionnaire de secrets : `${{{SECRET_ENV_VAR}}}`.
-- Jamais de valeur littérale pour : `password`, `secret`, `key`, `token`, `dsn`, `apiKey`, `privateKey`.
-- Fichiers `.env` → hors git (`.gitignore`), fournis via {{SECRET_STORE}}.
-- Certificats, keystores → volumes montés, jamais buildés dans l'image.
-- CI/CD : variables de pipeline injectées, jamais dans les logs de build.
+- Every secret → environment variable or secret manager: `${{{SECRET_ENV_VAR}}}`.
+- Never a literal value for: `password`, `secret`, `key`, `token`, `dsn`, `apiKey`, `privateKey`.
+- `.env` files → out of git (`.gitignore`), provided via {{SECRET_STORE}}.
+- Certificates, keystores → mounted volumes, never baked into the image.
+- CI/CD: pipeline variables injected, never present in build logs.
+- Local development → `dotnet user-secrets`; never a committed `appsettings.Development.json` with credentials.
 
 ## Anti-pattern
-```yaml
-# ❌ BLOCAGE — DSN en clair dans la config
-datasource:
-  url: jdbc:postgresql://{{DB_HOST}}:5432/{{DB_NAME}}
-  password: SuperSecret123  # commité, visible dans git
+```json
+// ❌ BLOCKER — DSN in clear text in the configuration
+{
+  "ConnectionStrings": {
+    "Default": "Server={{DB_HOST}};Database={{DB_NAME}};User Id=sa;Password=SuperSecret123;"
+  }
+}
 ```
 
-```java
-// ❌ BLOCAGE — clé API en dur
-private static final String API_KEY = "sk-prod-abcd1234";
+```csharp
+// ❌ BLOCKER — hardcoded API key
+private const string ApiKey = "sk-prod-abcd1234";
 ```
 
-## Pattern conforme
-```yaml
-# ✅ Référence à une variable d'environnement
-datasource:
-  url: ${{{DB_URL_ENV_VAR}}}
-  password: ${{{DB_PASSWORD_ENV_VAR}}}  # injecté depuis {{SECRET_STORE}}
+## Compliant pattern
+```json
+// ✅ appsettings.json — reference to environment variables
+{
+  "ConnectionStrings": {
+    "Default": "{{DB_URL_ENV_VAR}}"
+  }
+}
 ```
 
 ```yaml
-# ✅ Gestionnaire de secrets (exemple Kubernetes)
+# ✅ Secret manager (Kubernetes example)
 apiVersion: v1
 kind: Secret
 metadata:
@@ -54,8 +59,13 @@ stringData:
   {{DB_PASSWORD_ENV_VAR}}: "{{ vault_lookup('path/to/secret') }}"
 ```
 
-## Checklist CI/CD
-- [ ] `git-secrets --scan` ou `trufflehog` dans le pipeline → 0 secret détecté
-- [ ] `grep -r "password\s*=\s*['\"][^$\{]" src/` → 0 valeur littérale
-- [ ] Secret `{{MODULE_CIBLE}}-secrets` existe dans {{SECRET_STORE}} pour chaque environnement
-- [ ] Aucun `ARG` contenant un secret dans le Dockerfile
+```csharp
+// ✅ Program.cs — Key Vault with env-var override (ConnectionStrings__Default)
+builder.Configuration.AddAzureKeyVault(new Uri(builder.Configuration["KeyVault:Uri"]!), new DefaultAzureCredential());
+```
+
+## CI/CD checklist
+- [ ] `git-secrets --scan` or `trufflehog` in the pipeline → 0 secrets detected
+- [ ] `rg "password\s*=\s*['\"][^\$]" src/` → 0 literal values
+- [ ] Secret `{{MODULE_CIBLE}}-secrets` exists in {{SECRET_STORE}} for every environment
+- [ ] No Dockerfile `ARG`/`ENV` containing a secret

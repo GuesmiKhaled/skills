@@ -1,121 +1,120 @@
 ---
 id: "T-01"
-titre: "TDD, ArchUnit & Mutation Testing — la qualité des tests est prouvable"
-severite: "🔴 BLOCAGE (règle architecture sans test ArchUnit) — 🟡 ALERTE (mutant survivant sur règle critique)"
-applicable_si: [backend]
-declencheurs:
-  - "Toute PR sur une règle critique ({{CRITICAL_RULES}}) avec couverture haute mais assertions faibles"
-  - "Tout import framework dans le domaine non bloqué par ArchUnit"
-  - "Toute dépendance circulaire non détectée en CI"
-  - "Score mutation < {{MUTATION_THRESHOLD}} % sur une classe du cœur ({{CRITICAL_CLASSES}})"
+title: "TDD, architecture tests & mutation testing — test quality is provable"
+severity: "🔴 BLOCKER (architecture rule without an architecture test) — 🟡 WARNING (surviving mutant on a critical rule)"
+applies_to: [backend]
+triggers:
+  - "Any PR on a critical rule ({{CRITICAL_RULES}}) with high coverage but weak assertions"
+  - "Any framework reference in the Domain project not blocked by an architecture test"
+  - "Any circular dependency not detected in CI"
+  - "Mutation score < {{MUTATION_THRESHOLD}}% on a core class ({{CRITICAL_CLASSES}})"
 version: "1.0"
 ---
 
-## Risque
-100 % de couverture ne prouve rien : un test sans assertion passe, le mutant `<` → `<=` sur la règle de `{{BOUNDARY_RULE}}` survit → bug en prod découvert par le client.
-Sans ArchUnit : la règle « domaine sans framework » est un vœu pieux — un import passe silencieusement en CI et crée un couplage irréversible.
-Dépendance circulaire ({{CIRCULAR_DEP_EXAMPLE}}) non détectée → refactoring impossible.
+## Risk
+100% coverage proves nothing: a test without assertions passes, the `<` → `<=` mutant on the `{{BOUNDARY_RULE}}` rule survives → the bug reaches production and is found by the client.
+Without architecture tests: the "domain without framework" rule is a pious wish — a reference slips silently through CI and creates irreversible coupling.
+An undetected circular dependency ({{CIRCULAR_DEP_EXAMPLE}}) → refactoring becomes impossible.
 
-## Règles
+## Rules
 
-**TDD :**
-- Rouge → Vert → Refactor sur toute règle métier ({{DOMAIN_RULES_EXAMPLES}}).
-- Test unitaire de règle : 0 `{{INTEGRATION_TEST_ANNOTATION}}`, exécution < 100 ms.
-- Assertion sur la valeur exacte : `assertThat(result).isEqualByComparingTo("{{EXPECTED_VALUE}}")`.
+**TDD:**
+- Red → Green → Refactor on every business rule ({{DOMAIN_RULES_EXAMPLES}}).
+- Unit test of a rule: 0 integration attributes, execution < 100 ms.
+- Assertion on the exact value: `result.Should().Be({{EXPECTED_VALUE}})` (FluentAssertions).
 
-**ArchUnit — 4 règles obligatoires en CI :**
-```java
-// Règle 1 : le domaine ne dépend d'aucun framework
-noClasses().that().resideInPackage("..domain..")
-    .should().dependOnClassesThat()
-    .resideInAnyPackage("{{FRAMEWORK_PACKAGES}}")
-    .check(importedClasses);
+**Architecture tests (NetArchTest / ArchUnitNET) — 4 mandatory rules in CI:**
+```csharp
+// Rule 1: the Domain depends on no framework
+ArchRuleDefinition
+    .NoTypes()
+    .That().AreInNamespace("{{BASE_NAMESPACE}}.Domain")
+    .Should().NotDependOnAny(
+        Assemblies().That().AreInNamespace("Microsoft.AspNetCore", "Microsoft.EntityFrameworkCore"))
+    .Check(...);
 
-// Règle 2 : pas de cycle entre packages
-SlicesRuleDefinition.slices()
-    .matching("{{BASE_PACKAGE}}.(*)..")
-    .should().beFreeOfCycles()
-    .check(importedClasses);
+// Rule 2: no cycles between namespaces
+ArchRuleDefinition
+    .Classes()
+    .That().AreInNamespace("{{BASE_NAMESPACE}}")
+    .Should().HaveNoCyclicDependencies()
+    .Check(...);
 
-// Règle 3 : layering obligatoire (controller → service → repository)
-layeredArchitecture()
-    .consideringAllDependencies()
-    .layer("Controller").definedBy("..controller..")
-    .layer("Service")   .definedBy("..service..")
-    .layer("Repository").definedBy("..repository..")
-    .whereLayer("Controller").mayOnlyBeAccessedByLayers("Service")
-    .whereLayer("Repository").mayOnlyBeAccessedByLayers("Service")
-    .check(importedClasses);
+// Rule 3: mandatory layering (Controller → Service → Repository)
+ArchRuleDefinition
+    .Classes()
+    .That().AreInNamespace("..controller..")
+    .Should().OnlyHaveAccessToNamespaces("..service..", "..domain..")
+    .Check(...);
+// the Repository layer is accessible only from the Service layer
 
-// Règle 4 : pas de logique métier dans un repository
-noClasses().that().resideInPackage("..repository..")
-    .should().haveSimpleNameContaining("Service")
-    .orShould().haveSimpleNameContaining("Rule")
-    .check(importedClasses);
+// Rule 4: no business logic in repositories
+ArchRuleDefinition
+    .NoClasses()
+    .That().AreInNamespace("..repository..")
+    .Should().HaveNameMatching("..(Service|Rule)..")
+    .Check(...);
 ```
 
-**Mutation Testing ({{MUTATION_TOOL}}) — classes critiques :**
-- Score minimum : {{MUTATION_THRESHOLD}} % (seuil CI bloquant), cible {{MUTATION_TARGET}} % sur `{{CRITICAL_CLASSES}}`.
-- Mutant survivant sur règle d'argent/bordure → renforcer le test avec valeur exacte de bordure.
+**Mutation testing (Stryker.NET) — critical classes:**
+- Minimum score: {{MUTATION_THRESHOLD}}% (blocking CI threshold), target {{MUTATION_TARGET}}% on `{{CRITICAL_CLASSES}}`.
+- Surviving mutant on a money/boundary rule → strengthen the test with the exact boundary value.
 
 ## Anti-pattern
-```java
-// ❌ ALERTE — test sans assertion
-@Test void testProcess() {
-    service.process(command); // pas d'assertion → n'importe quel bug passe
+```csharp
+// ❌ WARNING — test without assertions
+[Fact]
+public void Process()
+{
+    _service.Process(command); // no assertion → any bug passes
 }
 
-// ❌ ALERTE — couverture sans preuve de bordure
-@Test void testValidation() {
-    assertDoesNotThrow(() -> rule.validate(new BigDecimal("{{BOUNDARY_VALUE}}")));
-    // montant exact à la limite jamais testé → mutant < → <= survit
+// ❌ WARNING — coverage without boundary proof
+[Fact]
+public void Validation()
+{
+    _ = _rule; // Assert.DoesNotThrow(() => _rule.Validate(m"{{BOUNDARY_VALUE}}"));
+    // the exact amount at the limit is never tested → the < → <= mutant survives
 }
 ```
 
-## Pattern conforme
-```java
-// ✅ Test rouge-vert-refactor avec assertion sur valeur exacte
-@Test void should_calculate_{{RULE_NAME}}_correctly() {
-    BigDecimal input    = new BigDecimal("{{INPUT_VALUE}}");
-    BigDecimal expected = new BigDecimal("{{EXPECTED_VALUE}}");
-    BigDecimal result   = calculator.calculate(input);
-    assertThat(result).isEqualByComparingTo(expected); // tue le mutant ±0.01
+## Compliant pattern
+```csharp
+// ✅ Red-green-refactor test with an exact-value assertion
+[Fact]
+public void Should_calculate_{{RULE_NAME}}_correctly()
+{
+    var input = decimal.Parse("{{INPUT_VALUE}}", CultureInfo.InvariantCulture);
+    var expected = decimal.Parse("{{EXPECTED_VALUE}}", CultureInfo.InvariantCulture);
+    var result = _calculator.Calculate(input);
+    result.Should().Be(expected); // kills the ±0.01 mutant
 }
 
-// ✅ Bordure exacte — tue le mutant < → <=
-@Test void should_reject_{{RULE_NAME}}_equal_to_limit() {
-    BigDecimal limit  = new BigDecimal("{{LIMIT_VALUE}}");
-    BigDecimal tested = new BigDecimal("{{LIMIT_VALUE}}"); // exactement la limite
-    assertThatThrownBy(() -> rule.validate(tested, limit))
-        .isInstanceOf({{LIMIT_EXCEPTION}}.class);
-}
-
-// ✅ ArchUnit dans la suite CI
-@AnalyzeClasses(packages = "{{BASE_PACKAGE}}")
-class ArchitectureRulesTest implements ArchRuleDefinition {
-    // Les 4 règles ci-dessus en @ArchTest
+// ✅ Exact boundary — kills the < → <= mutant
+[Fact]
+public void Should_reject_{{RULE_NAME}}_equal_to_limit()
+{
+    var limit = decimal.Parse("{{LIMIT_VALUE}}", CultureInfo.InvariantCulture);
+    var tested = limit; // exactly the limit
+    var act = () => _rule.Validate(tested, limit);
+    act.Should().Throw<{{LimitException}}>();
 }
 ```
 
 ```xml
-<!-- pom.xml — {{MUTATION_TOOL}} seuil bloquant en CI -->
-<plugin>
-    <groupId>org.pitest</groupId>
-    <artifactId>pitest-maven</artifactId>
-    <configuration>
-        <targetClasses>
-            <param>{{BASE_PACKAGE}}.*.domain.*</param>
-        </targetClasses>
-        <mutationThreshold>{{MUTATION_THRESHOLD}}</mutationThreshold>
-        <coverageThreshold>{{COVERAGE_THRESHOLD}}</coverageThreshold>
-    </configuration>
-</plugin>
+<!-- Test project .csproj — Stryker.NET blocking threshold in CI -->
+<StrykerConfiguration>
+  <break>0</break>
+  <low>{{MUTATION_THRESHOLD}}</low>
+  <high>{{MUTATION_TARGET}}</high>
+</StrykerConfiguration>
+<!-- Run: dotnet stryker --project {{BASE_PACKAGE}}.Domain.Tests -->
 ```
 
-## Checklist CI/CD
-- [ ] `mvn archunit:check` (ou équivalent) → 0 violation (4 règles) — bloque le build en CI
-- [ ] `{{MUTATION_TOOL}}` → score ≥ {{MUTATION_THRESHOLD}} % sur `domain.*` — bloque si < seuil
-- [ ] Aucun mutant survivant sur `{{CRITICAL_CLASSES}}` (rapport {{MUTATION_TOOL}})
-- [ ] Test de dépendance circulaire → règle `beFreeOfCycles` verte
-- [ ] Test de règle métier : 0 `{{INTEGRATION_TEST_ANNOTATION}}` sur les tests de domaine
-- [ ] `grep -r "assertDoesNotThrow\|assertTrue(true)" src/test/` → revue manuelle
+## CI/CD checklist
+- [ ] Architecture tests in CI → 0 violations (4 rules) — blocks the build
+- [ ] `dotnet stryker` → score ≥ {{MUTATION_THRESHOLD}}% on `Domain.*` — blocked below the threshold
+- [ ] No surviving mutant on `{{CRITICAL_CLASSES}}` (Stryker report)
+- [ ] Circular dependency test → green
+- [ ] Business rule tests: 0 integration attributes on domain tests
+- [ ] `rg "DoesNotThrow\(\)|Assert\.True\(true\)" src/test/` → manual review

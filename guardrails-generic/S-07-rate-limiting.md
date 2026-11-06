@@ -1,73 +1,61 @@
 ---
 id: "S-07"
-titre: "Rate Limiting & Throttling — protection des endpoints à effet"
-severite: "🔴 BLOCAGE (endpoint à effet sans rate limiting)"
-applicable_si: [backend]
-declencheurs:
-  - "Tout nouvel endpoint POST/PUT/DELETE à effet dans {{MODULE_CIBLE}}"
-  - "Tout endpoint exposé sans quota par identifiant (utilisateur, API key, IP)"
-  - "Tout endpoint critique sans protection contre les appels automatisés"
+title: "Rate limiting & throttling — protection of side-effect endpoints"
+severity: "🔴 BLOCKER (side-effect endpoint without rate limiting)"
+applies_to: [backend]
+triggers:
+  - "Any new side-effect POST/PUT/DELETE endpoint in {{MODULE_CIBLE}}"
+  - "Any exposed endpoint without a per-identifier quota (user, API key, IP)"
+  - "Any critical endpoint without protection against automated calls"
 version: "1.0"
 ---
 
-## Risque
-Un endpoint à effet sans rate limiting peut être inondé : {{MAX_CALLS}} appels en {{TIME_WINDOW}} = {{RISK_DESCRIPTION}} (saturation, coût, données incorrectes).
-Sans throttling sur {{EXTERNAL_RESOURCE}} : attaque par épuisement de ressource.
+## Risk
+A side-effect endpoint without rate limiting can be flooded: {{MAX_CALLS}} calls within {{TIME_WINDOW}} = {{RISK_DESCRIPTION}} (saturation, cost, incorrect data).
+Without throttling on {{EXTERNAL_RESOURCE}}: resource-exhaustion attack.
 
-## Règles
+## Rules
 
-- Tout endpoint POST à effet → quota par `{{IDENTIFIER_TYPE}}` (utilisateur, API key, IP).
-- Limites minimales : définies par {{TECH_LEAD}} selon le SLO de l'endpoint.
-- Dépassement → `429 Too Many Requests` + header `Retry-After: <secondes>` + corps d'erreur structuré (fiche A-03).
-- Fallback quota : si le store de comptage est indisponible → fail-open avec alerte (ne pas bloquer la production).
-- Métriques : `rate_limit_exceeded_total{endpoint, identifier}` exposée.
+- Every side-effect POST endpoint → quota per `{{IDENTIFIER_TYPE}}` (user, API key, IP).
+- Minimal limits: defined by {{TECH_LEAD}} according to the endpoint's SLO.
+- Exceeding → `429 Too Many Requests` + `Retry-After: <seconds>` header + structured error body (card A-03).
+- Quota fallback: if the counting store is unavailable → fail-open with an alert (don't block production).
+- Metrics: `rate_limit_exceeded_total{endpoint, identifier}` exposed.
 
 ## Anti-pattern
-```java
-// ❌ BLOCAGE — endpoint à effet sans quota
-@PostMapping("/{{ENDPOINT}}")
-public {{RESPONSE}} create(@RequestBody @Valid {{COMMAND}} cmd) {
-    return service.execute(cmd); // 0 protection contre l'inondation
-}
+```csharp
+// ❌ BLOCKER — side-effect endpoint without quota
+app.MapPost("/{{ENDPOINT}}", async ({{Command}} cmd) =>
+    await service.ExecuteAsync(cmd)); // 0 protection against flooding
 ```
 
-## Pattern conforme
-```java
-// ✅ Rate limiter par identifiant
-@PostMapping("/{{ENDPOINT}}")
-@RateLimiter(name = "{{ENDPOINT_RATE_LIMITER}}")
-public {{RESPONSE}} create(
-        @AuthenticationPrincipal {{PRINCIPAL_TYPE}} principal,
-        @RequestBody @Valid {{COMMAND}} cmd) {
-    return service.execute(cmd);
-}
+## Compliant pattern
+```csharp
+// ✅ Program.cs — per-identifier rate limiter
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("{{ENDPOINT_RATE_LIMITER}}", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partition: context.User?.Identity?.Name
+                ?? context.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                Window = TimeSpan.FromSeconds({{PERIOD}}),
+                PermitLimit = {{LIMIT}},
+                AutoTransition = true
+            }));
+});
+app.UseRateLimiter();
+
+app.MapPost("/{{ENDPOINT}}", Handle)
+    .RequireRateLimiting("{{ENDPOINT_RATE_LIMITER}}");
+// 429 + Retry-After header added automatically; body in ProblemDetails format (card A-03)
 ```
 
-```yaml
-# application.yml
-resilience4j.ratelimiter:
-  instances:
-    {{ENDPOINT_RATE_LIMITER}}:
-      limitForPeriod: {{LIMIT}}
-      limitRefreshPeriod: {{PERIOD}}
-      timeoutDuration: 0s
-```
-
-```java
-// ✅ Réponse 429 structurée
-@ExceptionHandler(RequestNotPermitted.class)
-ResponseEntity<ProblemDetail> handleRateLimit(RequestNotPermitted ex) {
-    ProblemDetail pd = ProblemDetail.forStatus(429);
-    pd.setTitle("Too Many Requests");
-    pd.setDetail("Rate limit exceeded for {{ENDPOINT}}. Retry after " + retryAfter + "s.");
-    return ResponseEntity.status(429)
-        .header("Retry-After", String.valueOf(retryAfter))
-        .body(pd);
-}
-```
-
-## Checklist CI/CD
-- [ ] Tout `POST` à effet → `@RateLimiter` ou filtre configuré
-- [ ] Test : {{LIMIT}} + 1 appels en {{PERIOD}} → le dernier retourne `429` avec `Retry-After`
-- [ ] Métrique `rate_limit_exceeded_total` visible dans le système de monitoring
-- [ ] Alerte si taux de 429 > {{ALERT_THRESHOLD}} % sur {{ENDPOINT}} (signe d'attaque ou bug client)
+## CI/CD checklist
+- [ ] Every side-effect `POST` → rate-limited policy
+- [ ] Test: {{LIMIT}} + 1 calls within {{PERIOD}} → the last returns `429` with `Retry-After`
+- [ ] Metric `rate_limit_exceeded_total` visible in the monitoring system
+- [ ] Alert if the 429 rate > {{ALERT_THRESHOLD}}% on {{ENDPOINT}} (sign of an attack or a client bug)
